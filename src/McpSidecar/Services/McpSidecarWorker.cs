@@ -12,21 +12,20 @@ public class McpSidecarWorker : IHostedService
     private readonly ClangdService _clangd;
     private readonly ExtractionService _extractionService;
     private readonly McpServer _mcpServer;
-    private readonly string? _workspaceRoot;
+    private readonly string _workspaceRoot;
 
     public McpSidecarWorker(
         ILogger<McpSidecarWorker> logger,
         ClangdService clangd,
         ExtractionService extractionService,
-        McpServer mcpServer)
+        McpServer mcpServer,
+        WorkspaceOptions workspace)
     {
         _logger = logger;
         _clangd = clangd;
         _extractionService = extractionService;
         _mcpServer = mcpServer;
-        
-        // Check for workspace root from environment or args
-        _workspaceRoot = Environment.GetEnvironmentVariable("MCP_WORKSPACE_ROOT");
+        _workspaceRoot = workspace.Root;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
