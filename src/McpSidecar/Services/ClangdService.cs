@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
@@ -52,6 +53,18 @@ public class ClangdService : IDisposable
             args += $" --compile-commands-dir={compileCommandsDir}";
         }
 
+        // Create workspace-specific cache directory for clangd temp files
+        // This avoids filling up /tmp with large index files
+        var workspaceHash = ComputeWorkspaceHash(_workspaceRoot);
+        var cacheBasePath = Environment.GetEnvironmentVariable("MCP_SIDECAR_CACHE_PATH")
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "mcp-sidecar");
+        var workspaceCachePath = Path.Combine(cacheBasePath, workspaceHash);
+        var clangdCachePath = Path.Combine(workspaceCachePath, "clangd");
+        var clangdTmpPath = Path.Combine(workspaceCachePath, "tmp");
+
+        Directory.CreateDirectory(clangdCachePath);
+        Directory.CreateDirectory(clangdTmpPath);
+
         _clangdProcess = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -66,6 +79,11 @@ public class ClangdService : IDisposable
                 WorkingDirectory = _workspaceRoot
             }
         };
+
+        // Set TMPDIR to workspace-specific directory to avoid filling /tmp
+        _clangdProcess.StartInfo.Environment["TMPDIR"] = clangdTmpPath;
+        _clangdProcess.StartInfo.Environment["TMP"] = clangdTmpPath;
+        _clangdProcess.StartInfo.Environment["TEMP"] = clangdTmpPath;
 
         _clangdProcess.ErrorDataReceived += (sender, e) =>
         {
@@ -346,6 +364,26 @@ public class ClangdService : IDisposable
 
             _clangdProcess.Dispose();
             _clangdProcess = null;
+        }
+    }
+
+    private static string ComputeWorkspaceHash(string path)
+    {
+        // Create a stable hash for the workspace path
+        using var sha256 = System.Security.Cryptography.SHA256.Create();
+        var hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(NormalizePath(path)));
+        return Convert.ToHexString(hashBytes)[..16].ToLowerInvariant();
+    }
+
+    private static string NormalizePath(string path)
+    {
+        try
+        {
+            return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+        }
+        catch
+        {
+            return path;
         }
     }
 

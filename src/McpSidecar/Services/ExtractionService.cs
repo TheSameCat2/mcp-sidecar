@@ -1664,8 +1664,23 @@ public class ExtractionService
             return new List<CompileCommandEntry>();
         }
 
-        using var stream = File.OpenRead(compileCommandsPath);
-        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        // For large compile_commands.json files, use async streaming with larger buffer
+        var fileInfo = new FileInfo(compileCommandsPath);
+        var bufferSize = Math.Max(65536, (int)Math.Min(fileInfo.Length, 1024 * 1024)); // Up to 1MB buffer
+
+        await using var stream = new FileStream(
+            compileCommandsPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize,
+            useAsync: true);
+
+        // Parse with explicit timeout handling
+        using var doc = await Task.Run(
+            async () => await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken),
+            cancellationToken);
+
         if (doc.RootElement.ValueKind != JsonValueKind.Array)
         {
             return new List<CompileCommandEntry>();
