@@ -117,9 +117,28 @@ public class ExtractionService
 
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
 
-        var parentSnapshotId = await GetCurrentSnapshotIdAsync(connection, cancellationToken);
-        var snapshotId = await CreateSnapshotAsync(connection, compileCommands, parentSnapshotId, "background", cancellationToken);
-        var state = new ExtractionState(snapshotId);
+        // Check for existing in_progress snapshot to resume
+        var existingSnapshotId = await GetInProgressSnapshotIdAsync(connection, cancellationToken);
+        long snapshotId;
+        var state = new ExtractionState(0);
+        
+        if (existingSnapshotId.HasValue)
+        {
+            snapshotId = existingSnapshotId.Value;
+            state = new ExtractionState(snapshotId);
+            _logger.LogInformation("Resuming extraction from existing snapshot {SnapshotId}", snapshotId);
+            progress?.Report(new ExtractionProgress { TotalFiles = totalFiles, CurrentPhase = "Resuming" });
+            
+            // Load already-processed files
+            await LoadProcessedFilesAsync(connection, state, cancellationToken);
+            _logger.LogInformation("Loaded {Count} previously processed files", state.SourceFiles.Count);
+        }
+        else
+        {
+            var parentSnapshotId = await GetCurrentSnapshotIdAsync(connection, cancellationToken);
+            snapshotId = await CreateSnapshotAsync(connection, compileCommands, parentSnapshotId, "background", cancellationToken);
+            state = new ExtractionState(snapshotId);
+        }
 
         state.SymbolProvenanceId = await RecordProvenanceAsync(
             connection,
@@ -214,10 +233,10 @@ public class ExtractionService
             cancellationToken);
 
         _logger.LogInformation(
-            "Created snapshot {SnapshotId} for workspace {WorkspaceRoot} (parent_snapshot_id={ParentSnapshotId})",
+            "{Action} snapshot {SnapshotId} for workspace {WorkspaceRoot}",
+            existingSnapshotId.HasValue ? "Resumed" : "Created",
             snapshotId,
-            _clangd.WorkspaceRoot,
-            parentSnapshotId);
+            _clangd.WorkspaceRoot);
 
         try
         {
@@ -301,6 +320,13 @@ public class ExtractionService
         foreach (var command in compileCommands)
         {
             var sourcePath = NormalizePath(command.SourceFile);
+            
+            // Skip already-processed files (resume support)
+            if (state.SourceFiles.Contains(sourcePath))
+            {
+                continue;
+            }
+            
             var sourceFileId = await EnsureFileAsync(connection, state, sourcePath, cancellationToken);
             state.SourceFiles.Add(sourcePath);
 
@@ -357,6 +383,12 @@ public class ExtractionService
     {
         foreach (var sourcePath in state.SourceFiles.Distinct(StringComparer.Ordinal))
         {
+            // Skip files that already have symbols extracted (resume support)
+            if (state.FilesSymbolsExtracted.Contains(sourcePath))
+            {
+                continue;
+            }
+            
             var fileUri = PathToFileUri(sourcePath);
             var fileId = await EnsureFileAsync(connection, state, sourcePath, cancellationToken);
             var parseContextId = await EnsureParseContextForFileAsync(connection, state, sourcePath, fileId, cancellationToken);
@@ -387,6 +419,9 @@ public class ExtractionService
                         cancellationToken);
                 }
             }
+            
+            // Mark this file as having symbols extracted
+            state.FilesSymbolsExtracted.Add(sourcePath);
         }
 
         var workspaceSymbolResponse = await _clangd.SendRequestAsync(
@@ -1231,6 +1266,98 @@ public class ExtractionService
         cmd.Parameters.AddWithValue("repo_root", NormalizePath(_clangd.WorkspaceRoot));
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         return result == null ? null : Convert.ToInt64(result);
+    }
+
+    private async Task<long?> GetInProgressSnapshotIdAsync(
+        DbConnection connection,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT snapshot_id
+            FROM snapshot
+            WHERE repo_root = @repo_root
+              AND index_status = 'in_progress'
+              AND is_archived = FALSE
+            ORDER BY created_at DESC, snapshot_id DESC
+            LIMIT 1;
+            """;
+
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
+        cmd.Parameters.AddWithValue("repo_root", NormalizePath(_clangd.WorkspaceRoot));
+        var result = await cmd.ExecuteScalarAsync(cancellationToken);
+        return result == null ? null : Convert.ToInt64(result);
+    }
+
+    private async Task LoadProcessedFilesAsync(
+        DbConnection connection,
+        ExtractionState state,
+        CancellationToken cancellationToken)
+    {
+        // Load files already processed for this snapshot
+        const string sql = """
+            SELECT f.path, f.file_id, pc.parse_context_id
+            FROM file f
+            LEFT JOIN parse_context pc ON pc.snapshot_id = f.snapshot_id AND pc.file_id = f.file_id
+            WHERE f.snapshot_id = @snapshot_id;
+            """;
+
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
+        cmd.Parameters.AddWithValue("snapshot_id", state.SnapshotId);
+        
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var path = reader.GetString(0);
+            var fileId = reader.GetInt64(1);
+            var parseContextId = reader.IsDBNull(2) ? 0 : reader.GetInt64(2);
+            
+            state.SourceFiles.Add(path);
+            state.FileIdsByPath[path] = fileId;
+            if (parseContextId > 0)
+            {
+                state.ParseContextByFileId[fileId] = parseContextId;
+                state.ParseContextByPath[path] = parseContextId;
+            }
+        }
+        
+        // Also load existing symbols to avoid re-extracting
+        const string symbolSql = """
+            SELECT stable_key, symbol_id, qualified_name
+            FROM symbol
+            WHERE snapshot_id = @snapshot_id;
+            """;
+            
+        await using var symbolCmd = connection.CreateDbCommand(_sqlBuilder, symbolSql);
+        symbolCmd.Parameters.AddWithValue("snapshot_id", state.SnapshotId);
+        
+        await using var symbolReader = await symbolCmd.ExecuteReaderAsync(cancellationToken);
+        while (await symbolReader.ReadAsync(cancellationToken))
+        {
+            var stableKey = symbolReader.GetString(0);
+            var symbolId = symbolReader.GetInt64(1);
+            var qualifiedName = symbolReader.GetString(2);
+            
+            state.SymbolIdsByStableKey[stableKey] = symbolId;
+            state.SymbolIdsByQualifiedName[qualifiedName] = symbolId;
+        }
+        
+        // Mark files that already have symbols extracted (files with symbol_decl entries)
+        const string extractedFilesSql = """
+            SELECT DISTINCT f.path
+            FROM file f
+            INNER JOIN symbol_decl sd ON sd.file_id = f.file_id
+            WHERE f.snapshot_id = @snapshot_id;
+            """;
+            
+        await using var extractedCmd = connection.CreateDbCommand(_sqlBuilder, extractedFilesSql);
+        extractedCmd.Parameters.AddWithValue("snapshot_id", state.SnapshotId);
+        
+        await using var extractedReader = await extractedCmd.ExecuteReaderAsync(cancellationToken);
+        while (await extractedReader.ReadAsync(cancellationToken))
+        {
+            var path = extractedReader.GetString(0);
+            state.FilesSymbolsExtracted.Add(path);
+        }
     }
 
     private async Task<int> ArchiveOldSnapshotsAsync(
@@ -2123,6 +2250,7 @@ public class ExtractionService
         public HashSet<string> OccurrenceDedupKeys { get; } = new(StringComparer.Ordinal);
         public HashSet<string> FileDependencyDedupKeys { get; } = new(StringComparer.Ordinal);
         public HashSet<string> CallsiteDedupKeys { get; } = new(StringComparer.Ordinal);
+        public HashSet<string> FilesSymbolsExtracted { get; } = new(StringComparer.Ordinal);
         public List<string> SourceFiles { get; } = new();
     }
 }
