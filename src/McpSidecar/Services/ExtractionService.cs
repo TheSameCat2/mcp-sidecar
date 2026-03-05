@@ -1250,12 +1250,12 @@ public class ExtractionService
                 FROM snapshot
                 WHERE is_archived = FALSE
             )
-            UPDATE snapshot s
+            UPDATE snapshot
             SET
                 is_archived = TRUE,
-                archived_at = now(),
-                last_updated_at = now()
-            WHERE s.snapshot_id IN (
+                archived_at = CURRENT_TIMESTAMP,
+                last_updated_at = CURRENT_TIMESTAMP
+            WHERE snapshot_id IN (
                 SELECT snapshot_id
                 FROM ranked
                 WHERE rn > @keep_latest
@@ -1277,7 +1277,7 @@ public class ExtractionService
             UPDATE snapshot
             SET
                 index_status = @index_status,
-                last_updated_at = now()
+                last_updated_at = CURRENT_TIMESTAMP
             WHERE snapshot_id = @snapshot_id;
             """;
 
