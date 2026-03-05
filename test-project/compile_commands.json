@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "/home/thesamecat/.openclaw/workspace/mcp-sidecar/test-project",
+    "command": "/usr/bin/c++ -std=c++20 -c main.cpp",
+    "file": "/home/thesamecat/.openclaw/workspace/mcp-sidecar/test-project/main.cpp"
+  }
+]
