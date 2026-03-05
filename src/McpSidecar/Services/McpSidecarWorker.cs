@@ -41,27 +41,50 @@ public class McpSidecarWorker : IHostedService
         _ = _mcpServer.StartAsync(cancellationToken);
         _logger.LogInformation("MCP server listening on stdio");
 
-        // Run extraction in background (don't block MCP server)
-        _ = Task.Run(async () =>
+        // Run extraction in background - track the task so we can wait for it on shutdown
+        _extractionTask = Task.Run(async () =>
         {
             try
             {
-                var snapshotId = await _extractionService.RunInitialExtractionAsync(cancellationToken);
+                // Use a separate cancellation token that we control
+                var snapshotId = await _extractionService.RunInitialExtractionAsync(_extractionCts.Token);
                 if (snapshotId.HasValue)
                 {
                     _logger.LogInformation("Initial extraction finished with snapshot_id={SnapshotId}", snapshotId.Value);
                 }
             }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("Initial extraction cancelled");
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Initial extraction failed");
             }
-        }, cancellationToken);
+        }, CancellationToken.None); // Don't use hosted service token
     }
+
+    private readonly CancellationTokenSource _extractionCts = new();
+    private Task? _extractionTask;
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("MCP Sidecar shutting down...");
+        
+        // Wait for extraction to complete (with timeout)
+        if (_extractionTask != null && !_extractionTask.IsCompleted)
+        {
+            _logger.LogInformation("Waiting for extraction to complete...");
+            var timeoutTask = Task.Delay(TimeSpan.FromMinutes(5), cancellationToken);
+            var completedTask = await Task.WhenAny(_extractionTask, timeoutTask);
+            
+            if (completedTask == timeoutTask)
+            {
+                _logger.LogWarning("Extraction timed out, cancelling...");
+                _extractionCts.Cancel();
+            }
+        }
+        
         await _clangd.StopAsync(cancellationToken);
         _logger.LogInformation("Clangd stopped");
     }
