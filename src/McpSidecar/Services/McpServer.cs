@@ -1,11 +1,11 @@
 using System.Linq;
+using System.Data.Common;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Microsoft.Extensions.Configuration;
+using McpSidecar.Services.Database;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Npgsql;
 
 namespace McpSidecar.Services;
 
@@ -19,7 +19,8 @@ public class McpServer
 
     private readonly ILogger<McpServer> _logger;
     private readonly ClangdService _clangd;
-    private readonly string? _connectionString;
+    private readonly IDbConnectionFactory _connectionFactory;
+    private readonly ISqlBuilder _sqlBuilder;
     private readonly IHostApplicationLifetime _appLifetime;
 
     private static readonly JsonSerializerOptions PrettyJson = new()
@@ -30,16 +31,15 @@ public class McpServer
     public McpServer(
         ILogger<McpServer> logger,
         ClangdService clangd,
-        IConfiguration configuration,
+        IDbConnectionFactory connectionFactory,
+        ISqlBuilder sqlBuilder,
         IHostApplicationLifetime appLifetime)
     {
         _logger = logger;
         _clangd = clangd;
+        _connectionFactory = connectionFactory;
+        _sqlBuilder = sqlBuilder;
         _appLifetime = appLifetime;
-        _connectionString =
-            configuration.GetConnectionString("Postgres")
-            ?? configuration["MCP_POSTGRES_CONNECTION"]
-            ?? configuration["POSTGRES_CONNECTION_STRING"];
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -508,15 +508,14 @@ public class McpServer
 
     private async Task<string> CppSnapshotStatusAsync(JsonElement args, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_connectionString))
+        if (!_connectionFactory.IsConfigured)
         {
-            return "cpp.snapshot_status requires a configured Postgres connection.";
+            return "cpp.snapshot_status requires a configured database connection.";
         }
 
         var requestedSnapshotId = TryGetOptionalInt64Argument(args, "snapshot_id", "snapshotId");
 
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
 
         var status = await LoadSnapshotStatusAsync(connection, requestedSnapshotId, cancellationToken);
         if (status == null)
@@ -620,7 +619,7 @@ public class McpServer
                 ["missing_headers"] = Array.Empty<object>(),
                 ["candidate_headers"] = Array.Empty<object>(),
                 ["confidence"] = 0m,
-                ["rationale"] = "No snapshot/file_dependency facts were found for this file in the latest Postgres snapshot."
+                ["rationale"] = "No snapshot/file_dependency facts were found for this file in the latest snapshot."
             };
 
             return JsonSerializer.Serialize(unavailablePayload, PrettyJson);
@@ -735,9 +734,9 @@ public class McpServer
 
     private async Task<string> CppFlowSummaryAsync(JsonElement args, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_connectionString))
+        if (!_connectionFactory.IsConfigured)
         {
-            return "cpp.flow_summary requires a configured Postgres connection.";
+            return "cpp.flow_summary requires a configured database connection.";
         }
 
         var symbolId = TryGetOptionalInt64Argument(args, "symbol_id", "symbolId");
@@ -826,9 +825,9 @@ public class McpServer
 
     private async Task<string> CppContextPackAsync(JsonElement args, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_connectionString))
+        if (!_connectionFactory.IsConfigured)
         {
-            return "cpp.context_pack requires a configured Postgres connection.";
+            return "cpp.context_pack requires a configured database connection.";
         }
 
         var symbolId = TryGetOptionalInt64Argument(args, "symbol_id", "symbolId");
@@ -846,8 +845,7 @@ public class McpServer
         const int primarySymbolLimit = 8;
         const int callDepth = 2;
 
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
 
         var snapshotId = await ResolveLatestSnapshotIdAsync(connection, cancellationToken);
         if (snapshotId == null)
@@ -861,7 +859,7 @@ public class McpServer
                     token_budget = tokenBudget
                 },
                 ["resolution_source"] = "unavailable",
-                ["reason"] = "No snapshot rows were found in Postgres.",
+                ["reason"] = "No snapshot rows were found.",
                 ["primary_symbols"] = Array.Empty<object>(),
                 ["callers"] = Array.Empty<object>(),
                 ["callees"] = Array.Empty<object>(),
@@ -1162,7 +1160,7 @@ public class McpServer
     }
 
     private async Task<SnapshotStatusInfo?> LoadSnapshotStatusAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         long? requestedSnapshotId,
         CancellationToken cancellationToken)
     {
@@ -1253,7 +1251,7 @@ public class McpServer
                            CROSS JOIN parse_stats ps;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue(
             "requested_snapshot_id",
             requestedSnapshotId.HasValue ? requestedSnapshotId.Value : (object)DBNull.Value);
@@ -1273,8 +1271,8 @@ public class McpServer
             VcsCommit = GetNullableString(reader, "vcs_commit"),
             ParentSnapshotId = GetNullableInt64(reader, "parent_snapshot_id"),
             Kind = reader.GetString(reader.GetOrdinal("kind")),
-            CreatedAt = reader.GetDateTime(reader.GetOrdinal("created_at")),
-            LastUpdatedAt = reader.GetDateTime(reader.GetOrdinal("last_updated_at")),
+            CreatedAt = ReadDateTimeFlexible(reader, "created_at"),
+            LastUpdatedAt = ReadDateTimeFlexible(reader, "last_updated_at"),
             IndexStatus = reader.GetString(reader.GetOrdinal("index_status")),
             TotalSymbols = reader.GetInt64(reader.GetOrdinal("total_symbols")),
             TotalRefs = reader.GetInt64(reader.GetOrdinal("total_refs")),
@@ -1283,12 +1281,12 @@ public class McpServer
             ParseContextCount = reader.GetInt64(reader.GetOrdinal("parse_context_count")),
             ParseErrorContexts = reader.GetInt64(reader.GetOrdinal("parse_error_contexts")),
             BorrowedContexts = reader.GetInt64(reader.GetOrdinal("borrowed_contexts")),
-            AvgParseConfidence = reader.GetDecimal(reader.GetOrdinal("avg_parse_confidence"))
+            AvgParseConfidence = ReadDecimalFlexible(reader, "avg_parse_confidence")
         };
     }
 
     private async Task<long?> ResolveLatestSnapshotIdAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         CancellationToken cancellationToken)
     {
         const string sql = """
@@ -1300,14 +1298,14 @@ public class McpServer
                            LIMIT 1;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("repo_root", NormalizePath(_clangd.WorkspaceRoot));
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         return result == null ? null : Convert.ToInt64(result);
     }
 
     private async Task<List<long>> LoadContextPackPrimarySymbolIdsForFileAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         long snapshotId,
         long fileId,
         int limit,
@@ -1329,7 +1327,7 @@ public class McpServer
                            LIMIT @limit;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
         cmd.Parameters.AddWithValue("file_id", fileId);
         cmd.Parameters.AddWithValue("limit", limit);
@@ -1345,7 +1343,7 @@ public class McpServer
     }
 
     private async Task<List<ContextPackSymbolCard>> LoadContextPackSymbolCardsAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         long snapshotId,
         IReadOnlyList<long> symbolIds,
         long? preferredSymbolId,
@@ -1425,7 +1423,7 @@ public class McpServer
                            LIMIT @limit;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
         cmd.Parameters.AddWithValue("symbol_ids", symbolIds.ToArray());
         cmd.Parameters.AddWithValue("preferred_symbol_id", preferredSymbolId ?? (object)DBNull.Value);
@@ -1443,7 +1441,7 @@ public class McpServer
                 QualifiedName = reader.GetString(reader.GetOrdinal("qualified_name")),
                 Visibility = reader.GetString(reader.GetOrdinal("visibility")),
                 TemplateKind = reader.GetString(reader.GetOrdinal("template_kind")),
-                IsExported = !reader.IsDBNull(reader.GetOrdinal("is_exported")) && reader.GetBoolean(reader.GetOrdinal("is_exported")),
+                IsExported = ReadBooleanFlexible(reader, "is_exported"),
                 OwnerSymbolId = GetNullableInt64(reader, "owner_symbol_id"),
                 OwnerQualifiedName = GetNullableString(reader, "owner_qualified_name"),
                 SignatureText = GetNullableString(reader, "signature_text"),
@@ -1465,7 +1463,7 @@ public class McpServer
     }
 
     private async Task<List<ContextPackCallEdge>> LoadContextPackCallEdgesAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         long snapshotId,
         IReadOnlyList<long> rootSymbolIds,
         bool incoming,
@@ -1593,7 +1591,7 @@ public class McpServer
               LIMIT @limit;
               """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
         cmd.Parameters.AddWithValue("root_symbol_ids", rootSymbolIds.ToArray());
         cmd.Parameters.AddWithValue("max_depth", maxDepth);
@@ -1618,7 +1616,7 @@ public class McpServer
     }
 
     private async Task<List<ContextPackRelatedType>> LoadContextPackRelatedTypesAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         long snapshotId,
         IReadOnlyList<long> rootSymbolIds,
         int limit,
@@ -1668,7 +1666,7 @@ public class McpServer
                            LIMIT @limit;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
         cmd.Parameters.AddWithValue("root_symbol_ids", rootSymbolIds.ToArray());
         cmd.Parameters.AddWithValue("limit", limit);
@@ -1691,7 +1689,7 @@ public class McpServer
     }
 
     private async Task<List<ContextPackIncludeContext>> LoadContextPackIncludeContextAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         long snapshotId,
         IReadOnlyList<long> fileIds,
         long? preferredFileId,
@@ -1730,7 +1728,7 @@ public class McpServer
                            LIMIT @limit;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
         cmd.Parameters.AddWithValue("file_ids", fileIds.ToArray());
         cmd.Parameters.AddWithValue("preferred_file_id", preferredFileId ?? (object)DBNull.Value);
@@ -1750,8 +1748,8 @@ public class McpServer
                 DefinedSymbolCount = reader.GetInt64(reader.GetOrdinal("defined_symbol_count")),
                 ReferencedSymbolCount = reader.GetInt64(reader.GetOrdinal("referenced_symbol_count")),
                 TopExternalDependencies = dependencies,
-                MacroDensity = reader.GetDecimal(reader.GetOrdinal("macro_density")),
-                ParseCoverage = reader.GetDecimal(reader.GetOrdinal("parse_coverage")),
+                MacroDensity = ReadDecimalFlexible(reader, "macro_density"),
+                ParseCoverage = ReadDecimalFlexible(reader, "parse_coverage"),
                 RelevantHeaders = ExtractExternalDependencyPaths(dependencies)
             });
         }
@@ -1906,13 +1904,12 @@ public class McpServer
 
     private async Task<long?> ResolveSymbolIdByQualifiedNameAsync(string qualifiedName, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_connectionString))
+        if (!_connectionFactory.IsConfigured)
         {
             return null;
         }
 
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
 
         const string sql = """
             SELECT symbol_id
@@ -1930,7 +1927,7 @@ public class McpServer
             LIMIT 1;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("qualified_name", qualifiedName);
         cmd.Parameters.AddWithValue("repo_root", NormalizePath(_clangd.WorkspaceRoot));
 
@@ -1941,13 +1938,12 @@ public class McpServer
     private async Task<List<FlowSummaryRow>> LoadFlowSummaryRowsAsync(long symbolId, CancellationToken cancellationToken)
     {
         var rows = new List<FlowSummaryRow>();
-        if (string.IsNullOrWhiteSpace(_connectionString))
+        if (!_connectionFactory.IsConfigured)
         {
             return rows;
         }
 
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
 
         const string sql = """
             SELECT
@@ -1988,7 +1984,7 @@ public class McpServer
             LIMIT 200;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("symbol_id", symbolId);
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -2024,7 +2020,7 @@ public class McpServer
                 Extractor = reader.GetString(reader.GetOrdinal("extractor")),
                 Method = reader.GetString(reader.GetOrdinal("method")),
                 Exactness = reader.GetString(reader.GetOrdinal("exactness")),
-                Confidence = reader.GetDecimal(reader.GetOrdinal("confidence")),
+                Confidence = ReadDecimalFlexible(reader, "confidence"),
                 EvidenceJson = evidenceJson
             });
         }
@@ -2038,15 +2034,14 @@ public class McpServer
         long? requestedSymbolId,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_connectionString))
+        if (!_connectionFactory.IsConfigured)
         {
             return null;
         }
 
         try
         {
-            await using var connection = new NpgsqlConnection(_connectionString);
-            await connection.OpenAsync(cancellationToken);
+            await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
 
             var target = await ResolveLatestFileAsync(connection, normalizedFile, cancellationToken);
             if (target == null)
@@ -2157,13 +2152,13 @@ public class McpServer
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed querying include_explain data from Postgres for {FilePath}", normalizedFile);
+            _logger.LogWarning(ex, "Failed querying include_explain data from database for {FilePath}", normalizedFile);
             return null;
         }
     }
 
     private async Task<SnapshotFileRef?> ResolveLatestFileAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         string normalizedFile,
         CancellationToken cancellationToken)
     {
@@ -2188,7 +2183,7 @@ public class McpServer
                            LIMIT 1;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("file_path", normalizedFile);
         cmd.Parameters.AddWithValue("repo_root", NormalizePath(_clangd.WorkspaceRoot));
 
@@ -2205,7 +2200,7 @@ public class McpServer
     }
 
     private async Task<long> GetReferencedSymbolCountAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         SnapshotFileRef target,
         CancellationToken cancellationToken)
     {
@@ -2218,7 +2213,7 @@ public class McpServer
                                AND (o.role_bits & @role_decl_mask) = 0;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", target.SnapshotId);
         cmd.Parameters.AddWithValue("file_id", target.FileId);
         cmd.Parameters.AddWithValue("role_decl_mask", RoleDeclarationBit);
@@ -2228,7 +2223,7 @@ public class McpServer
     }
 
     private async Task<List<IncludeUsageHeader>> LoadIncludeUsageAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         SnapshotFileRef target,
         CancellationToken cancellationToken)
     {
@@ -2295,7 +2290,7 @@ public class McpServer
                            ORDER BY di.header_path, di.directive_kind, di.literal_text NULLS LAST;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", target.SnapshotId);
         cmd.Parameters.AddWithValue("file_id", target.FileId);
         cmd.Parameters.AddWithValue("role_decl_mask", RoleDeclarationBit);
@@ -2311,7 +2306,7 @@ public class McpServer
                 DirectiveKind: reader.GetString(reader.GetOrdinal("directive_kind")),
                 SupportCount: reader.GetInt64(reader.GetOrdinal("support_count")),
                 IncludeLine: reader.GetInt32(reader.GetOrdinal("include_line")),
-                MaxConfidence: reader.GetDecimal(reader.GetOrdinal("max_confidence")),
+                MaxConfidence: ReadDecimalFlexible(reader, "max_confidence"),
                 UsedSymbolCount: reader.GetInt64(reader.GetOrdinal("used_symbol_count")),
                 SampleSymbols: ReadTextArray(reader, "sample_symbols")));
         }
@@ -2320,7 +2315,7 @@ public class McpServer
     }
 
     private async Task<List<MissingHeaderRecommendation>> LoadMissingHeadersFromReferencesAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         SnapshotFileRef target,
         CancellationToken cancellationToken)
     {
@@ -2410,7 +2405,7 @@ public class McpServer
                            LIMIT 40;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", target.SnapshotId);
         cmd.Parameters.AddWithValue("file_id", target.FileId);
         cmd.Parameters.AddWithValue("role_decl_mask", RoleDeclarationBit);
@@ -2425,7 +2420,7 @@ public class McpServer
                 Source: "referenced_symbol_no_direct_include",
                 RawText: null,
                 RawLine: null,
-                Confidence: reader.GetDecimal(reader.GetOrdinal("max_confidence")),
+                Confidence: ReadDecimalFlexible(reader, "max_confidence"),
                 CandidateHeaders: ReadTextArray(reader, "candidate_headers")));
         }
 
@@ -2433,7 +2428,7 @@ public class McpServer
     }
 
     private async Task<List<UnresolvedCallsiteInfo>> LoadUnresolvedCallIdentifiersAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         SnapshotFileRef target,
         CancellationToken cancellationToken)
     {
@@ -2458,7 +2453,7 @@ public class McpServer
                            LIMIT 25;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", target.SnapshotId);
         cmd.Parameters.AddWithValue("file_id", target.FileId);
 
@@ -2475,7 +2470,7 @@ public class McpServer
     }
 
     private async Task<List<CandidateHeaderMatch>> LoadCandidateHeadersBySymbolIdAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         long snapshotId,
         long symbolId,
         string querySource,
@@ -2518,7 +2513,7 @@ public class McpServer
                            LIMIT 20;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
         cmd.Parameters.AddWithValue("symbol_id", symbolId);
 
@@ -2533,7 +2528,7 @@ public class McpServer
                 HeaderPath: reader.GetString(reader.GetOrdinal("header_path")),
                 DeclarationCount: reader.GetInt64(reader.GetOrdinal("declaration_count")),
                 DefinitionCount: reader.GetInt64(reader.GetOrdinal("definition_count")),
-                Confidence: reader.GetDecimal(reader.GetOrdinal("max_confidence")),
+                Confidence: ReadDecimalFlexible(reader, "max_confidence"),
                 MatchKind: "symbol_id",
                 MatchRank: 0,
                 HeaderRank: reader.GetInt32(reader.GetOrdinal("header_rank")),
@@ -2545,7 +2540,7 @@ public class McpServer
     }
 
     private async Task<List<CandidateHeaderMatch>> LoadCandidateHeadersByIdentifierAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         long snapshotId,
         string identifier,
         string querySource,
@@ -2600,7 +2595,7 @@ public class McpServer
                            LIMIT 30;
                            """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
         cmd.Parameters.AddWithValue("identifier", identifier);
 
@@ -2623,7 +2618,7 @@ public class McpServer
                 HeaderPath: reader.GetString(reader.GetOrdinal("header_path")),
                 DeclarationCount: reader.GetInt64(reader.GetOrdinal("declaration_count")),
                 DefinitionCount: reader.GetInt64(reader.GetOrdinal("definition_count")),
-                Confidence: reader.GetDecimal(reader.GetOrdinal("max_confidence")),
+                Confidence: ReadDecimalFlexible(reader, "max_confidence"),
                 MatchKind: matchKind,
                 MatchRank: matchRank,
                 HeaderRank: reader.GetInt32(reader.GetOrdinal("header_rank")),
@@ -2685,7 +2680,7 @@ public class McpServer
 
             if (!result.Available)
             {
-                result.Notes.Add("No include-level hints from clangd; fallback classification used Postgres file_dependency + symbol usage joins.");
+                result.Notes.Add("No include-level hints from clangd; fallback classification used database file_dependency + symbol usage joins.");
             }
         }
         catch (Exception ex)
@@ -2845,15 +2840,14 @@ public class McpServer
 
     private async Task<BuildExplainInfo?> TryGetBuildExplainFromPostgresAsync(string normalizedFile, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(_connectionString))
+        if (!_connectionFactory.IsConfigured)
         {
             return null;
         }
 
         try
         {
-            await using var connection = new NpgsqlConnection(_connectionString);
-            await connection.OpenAsync(cancellationToken);
+            await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
 
             const string sql = """
                                SELECT
@@ -2906,7 +2900,7 @@ public class McpServer
                                LIMIT 1;
                                """;
 
-            await using var cmd = new NpgsqlCommand(sql, connection);
+            await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
             cmd.Parameters.AddWithValue("file_path", normalizedFile);
             cmd.Parameters.AddWithValue("repo_root", NormalizePath(_clangd.WorkspaceRoot));
 
@@ -2969,7 +2963,7 @@ public class McpServer
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed querying build context from Postgres for {FilePath}", normalizedFile);
+            _logger.LogWarning(ex, "Failed querying build context from database for {FilePath}", normalizedFile);
             return null;
         }
     }
@@ -3100,7 +3094,7 @@ public class McpServer
             Argv = argv,
             CommandText = string.Join(" ", argv),
             Compiler = "clang++",
-            ParseWarnings = new List<string> { "No Postgres build_config row and no compile_commands entry found; command inferred." }
+            ParseWarnings = new List<string> { "No build_config row and no compile_commands entry found; command inferred." }
         };
     }
 
@@ -3120,7 +3114,7 @@ public class McpServer
             TargetTriple = ParseArgValue(command.Argv, "-target", "--target"),
             Sysroot = ParseArgValue(command.Argv, "--sysroot", "-isysroot"),
             OutputPath = command.OutputPath,
-            ParseWarnings = new List<string> { "Using compile_commands fallback because no matching Postgres build_config context was found." }
+            ParseWarnings = new List<string> { "Using compile_commands fallback because no matching database build_config context was found." }
         };
     }
 
@@ -3477,22 +3471,102 @@ public class McpServer
         errors.Add(message);
     }
 
-    private static string? GetNullableString(NpgsqlDataReader reader, string columnName)
+    private static string? GetNullableString(DbDataReader reader, string columnName)
     {
         var ordinal = reader.GetOrdinal(columnName);
         return reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
     }
 
-    private static long? GetNullableInt64(NpgsqlDataReader reader, string columnName)
+    private static long? GetNullableInt64(DbDataReader reader, string columnName)
     {
         var ordinal = reader.GetOrdinal(columnName);
-        return reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
+        return reader.IsDBNull(ordinal) ? null : ConvertToInt64(reader.GetValue(ordinal));
     }
 
-    private static decimal? GetNullableDecimal(NpgsqlDataReader reader, string columnName)
+    private static decimal? GetNullableDecimal(DbDataReader reader, string columnName)
     {
         var ordinal = reader.GetOrdinal(columnName);
-        return reader.IsDBNull(ordinal) ? null : reader.GetDecimal(ordinal);
+        return reader.IsDBNull(ordinal) ? null : ConvertToDecimal(reader.GetValue(ordinal));
+    }
+
+    private static decimal ReadDecimalFlexible(DbDataReader reader, string columnName)
+    {
+        var ordinal = reader.GetOrdinal(columnName);
+        return reader.IsDBNull(ordinal) ? 0m : ConvertToDecimal(reader.GetValue(ordinal));
+    }
+
+    private static bool ReadBooleanFlexible(DbDataReader reader, string columnName)
+    {
+        var ordinal = reader.GetOrdinal(columnName);
+        if (reader.IsDBNull(ordinal))
+        {
+            return false;
+        }
+
+        var value = reader.GetValue(ordinal);
+        return value switch
+        {
+            bool flag => flag,
+            byte b => b != 0,
+            short s => s != 0,
+            int i => i != 0,
+            long l => l != 0,
+            decimal d => d != 0m,
+            double dbl => Math.Abs(dbl) > double.Epsilon,
+            string text when bool.TryParse(text, out var parsed) => parsed,
+            string text when long.TryParse(text, out var parsedLong) => parsedLong != 0,
+            _ => Convert.ToBoolean(value)
+        };
+    }
+
+    private static DateTime ReadDateTimeFlexible(DbDataReader reader, string columnName)
+    {
+        var ordinal = reader.GetOrdinal(columnName);
+        if (reader.IsDBNull(ordinal))
+        {
+            return DateTime.MinValue;
+        }
+
+        var value = reader.GetValue(ordinal);
+        return value switch
+        {
+            DateTime dateTime => dateTime,
+            DateTimeOffset dto => dto.UtcDateTime,
+            string text when DateTime.TryParse(text, out var parsed) => parsed,
+            _ => Convert.ToDateTime(value)
+        };
+    }
+
+    private static long ConvertToInt64(object value)
+    {
+        return value switch
+        {
+            long l => l,
+            int i => i,
+            short s => s,
+            byte b => b,
+            decimal d => (long)d,
+            double dbl => (long)dbl,
+            float f => (long)f,
+            string text when long.TryParse(text, out var parsed) => parsed,
+            _ => Convert.ToInt64(value)
+        };
+    }
+
+    private static decimal ConvertToDecimal(object value)
+    {
+        return value switch
+        {
+            decimal d => d,
+            double dbl => Convert.ToDecimal(dbl),
+            float f => Convert.ToDecimal(f),
+            long l => l,
+            int i => i,
+            short s => s,
+            byte b => b,
+            string text when decimal.TryParse(text, out var parsed) => parsed,
+            _ => Convert.ToDecimal(value)
+        };
     }
 
     private static JsonElement ParseJsonElementOrDefault(string? rawJson)
@@ -3513,7 +3587,7 @@ public class McpServer
         }
     }
 
-    private static string? ReadJsonAsString(NpgsqlDataReader reader, string columnName)
+    private static string? ReadJsonAsString(DbDataReader reader, string columnName)
     {
         var ordinal = reader.GetOrdinal(columnName);
         if (reader.IsDBNull(ordinal))
@@ -3531,7 +3605,7 @@ public class McpServer
         };
     }
 
-    private static List<string> ReadTextArray(NpgsqlDataReader reader, string columnName)
+    private static List<string> ReadTextArray(DbDataReader reader, string columnName)
     {
         var ordinal = reader.GetOrdinal(columnName);
         if (reader.IsDBNull(ordinal))

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using McpSidecar.Services.Database;
 using McpSidecar.Services;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -13,6 +14,8 @@ builder.Logging.AddConsole(options =>
 });
 
 // Register services
+builder.Services.AddSingleton<IDbConnectionFactory, DbConnectionFactory>();
+builder.Services.AddSingleton<ISqlBuilder, SqlBuilder>();
 builder.Services.AddSingleton<ClangdService>();
 builder.Services.AddSingleton<ExtractionService>();
 builder.Services.AddSingleton<McpServer>();

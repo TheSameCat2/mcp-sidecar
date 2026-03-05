@@ -1,18 +1,18 @@
 using System.Diagnostics;
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using McpSidecar.Models;
-using Microsoft.Extensions.Configuration;
+using McpSidecar.Services.Database;
 using Microsoft.Extensions.Logging;
-using Npgsql;
 using NpgsqlTypes;
 
 namespace McpSidecar.Services;
 
 /// <summary>
-/// Extracts build-aware code facts from clangd/LSP into Postgres.
+/// Extracts build-aware code facts from clangd/LSP into the configured database backend.
 /// </summary>
 public class ExtractionService
 {
@@ -27,19 +27,19 @@ public class ExtractionService
 
     private readonly ILogger<ExtractionService> _logger;
     private readonly ClangdService _clangd;
-    private readonly string? _connectionString;
+    private readonly IDbConnectionFactory _connectionFactory;
+    private readonly ISqlBuilder _sqlBuilder;
 
     public ExtractionService(
         ILogger<ExtractionService> logger,
         ClangdService clangd,
-        IConfiguration configuration)
+        IDbConnectionFactory connectionFactory,
+        ISqlBuilder sqlBuilder)
     {
         _logger = logger;
         _clangd = clangd;
-        _connectionString =
-            configuration.GetConnectionString("Postgres")
-            ?? configuration["MCP_POSTGRES_CONNECTION"]
-            ?? configuration["POSTGRES_CONNECTION_STRING"];
+        _connectionFactory = connectionFactory;
+        _sqlBuilder = sqlBuilder;
     }
 
     public async Task<long?> CreateSnapshotAsync(
@@ -47,9 +47,9 @@ public class ExtractionService
         string kind = "background",
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(_connectionString))
+        if (!_connectionFactory.IsConfigured)
         {
-            _logger.LogWarning("Cannot create snapshot: missing Postgres connection string.");
+            _logger.LogWarning("Cannot create snapshot: database is not configured.");
             return null;
         }
 
@@ -59,21 +59,19 @@ public class ExtractionService
             compileCommands = DiscoverFallbackCompileCommands().ToList();
         }
 
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
         var effectiveParentId = parentSnapshotId ?? await GetCurrentSnapshotIdAsync(connection, cancellationToken);
         return await CreateSnapshotAsync(connection, compileCommands, effectiveParentId, kind, cancellationToken);
     }
 
     public async Task<long?> GetCurrentSnapshotIdAsync(CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(_connectionString))
+        if (!_connectionFactory.IsConfigured)
         {
             return null;
         }
 
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
         return await GetCurrentSnapshotIdAsync(connection, cancellationToken);
     }
 
@@ -81,21 +79,20 @@ public class ExtractionService
         int keepLatest = 5,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(_connectionString))
+        if (!_connectionFactory.IsConfigured)
         {
             return 0;
         }
 
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
         return await ArchiveOldSnapshotsAsync(connection, keepLatest, cancellationToken);
     }
 
     public async Task<long?> RunInitialExtractionAsync(CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(_connectionString))
+        if (!_connectionFactory.IsConfigured)
         {
-            _logger.LogWarning("Skipping extraction: missing Postgres connection string (ConnectionStrings:Postgres).");
+            _logger.LogWarning("Skipping extraction: database is not configured.");
             return null;
         }
 
@@ -112,8 +109,7 @@ public class ExtractionService
             _logger.LogInformation("No compile_commands.json entries found, using inferred source files: {Count}", compileCommands.Count);
         }
 
-        await using var connection = new NpgsqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
 
         var parentSnapshotId = await GetCurrentSnapshotIdAsync(connection, cancellationToken);
         var snapshotId = await CreateSnapshotAsync(connection, compileCommands, parentSnapshotId, "background", cancellationToken);
@@ -252,7 +248,7 @@ public class ExtractionService
     }
 
     private async Task SeedBuildAndParseContextAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         ExtractionState state,
         IReadOnlyList<CompileCommandEntry> compileCommands,
         CancellationToken cancellationToken)
@@ -310,7 +306,7 @@ public class ExtractionService
     }
 
     private async Task ExtractSymbolsAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         ExtractionState state,
         CancellationToken cancellationToken)
     {
@@ -373,7 +369,7 @@ public class ExtractionService
     }
 
     private async Task ExtractOccurrencesAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         ExtractionState state,
         CancellationToken cancellationToken)
     {
@@ -451,7 +447,7 @@ public class ExtractionService
     }
 
     private async Task ExtractCallHierarchyAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         ExtractionState state,
         CancellationToken cancellationToken)
     {
@@ -587,7 +583,7 @@ public class ExtractionService
     }
 
     private async Task ExtractFileDependenciesAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         ExtractionState state,
         CancellationToken cancellationToken)
     {
@@ -700,7 +696,7 @@ public class ExtractionService
     }
 
     private async Task ProcessDocumentSymbolElementAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         ExtractionState state,
         JsonElement symbolElement,
         string filePath,
@@ -824,7 +820,7 @@ public class ExtractionService
     }
 
     private async Task ProcessSymbolInformationAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         ExtractionState state,
         JsonElement symbolElement,
         string? defaultFilePath,
@@ -961,7 +957,7 @@ public class ExtractionService
     }
 
     private async Task<long> EnsureSymbolFromHierarchyItemAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         ExtractionState state,
         JsonElement hierarchyItem,
         string filePath,
@@ -1051,7 +1047,7 @@ public class ExtractionService
     }
 
     private async Task<long> EnsureFileAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         ExtractionState state,
         string rawPath,
         CancellationToken cancellationToken)
@@ -1093,7 +1089,7 @@ public class ExtractionService
             RETURNING file_id;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         var realPathValue = fileExists ? (object)normalizedPath : DBNull.Value;
         cmd.Parameters.AddWithValue("snapshot_id", state.SnapshotId);
         cmd.Parameters.AddWithValue("path", displayPath);
@@ -1111,7 +1107,7 @@ public class ExtractionService
     }
 
     private async Task<long> EnsureParseContextForFileAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         ExtractionState state,
         string filePath,
         long fileId,
@@ -1153,7 +1149,7 @@ public class ExtractionService
     }
 
     private async Task<long> CreateSnapshotAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         IReadOnlyList<CompileCommandEntry> compileCommands,
         long? parentSnapshotId,
         string kind,
@@ -1174,7 +1170,7 @@ public class ExtractionService
     }
 
     private async Task<long?> GetCurrentSnapshotIdAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         CancellationToken cancellationToken)
     {
         const string sql = """
@@ -1186,14 +1182,14 @@ public class ExtractionService
             LIMIT 1;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("repo_root", NormalizePath(_clangd.WorkspaceRoot));
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         return result == null ? null : Convert.ToInt64(result);
     }
 
-    private static async Task<int> ArchiveOldSnapshotsAsync(
-        NpgsqlConnection connection,
+    private async Task<int> ArchiveOldSnapshotsAsync(
+        DbConnection connection,
         int keepLatest,
         CancellationToken cancellationToken)
     {
@@ -1221,13 +1217,13 @@ public class ExtractionService
             );
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("keep_latest", effectiveKeepLatest);
         return await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task UpdateSnapshotStatusAsync(
-        NpgsqlConnection connection,
+    private async Task UpdateSnapshotStatusAsync(
+        DbConnection connection,
         long snapshotId,
         string indexStatus,
         CancellationToken cancellationToken)
@@ -1240,14 +1236,14 @@ public class ExtractionService
             WHERE snapshot_id = @snapshot_id;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
         cmd.Parameters.AddWithValue("index_status", indexStatus);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private async Task<long> InsertSnapshotAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         Snapshot snapshot,
         CancellationToken cancellationToken)
     {
@@ -1275,7 +1271,7 @@ public class ExtractionService
             RETURNING snapshot_id;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("repo_root", snapshot.RepoRoot);
         cmd.Parameters.AddWithValue("vcs_commit", (object?)snapshot.VcsCommit ?? DBNull.Value);
         cmd.Parameters.AddWithValue("workspace_hash", snapshot.WorkspaceHash);
@@ -1288,7 +1284,7 @@ public class ExtractionService
     }
 
     private async Task<long> InsertBuildConfigAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         BuildConfig buildConfig,
         CancellationToken cancellationToken)
     {
@@ -1301,15 +1297,15 @@ public class ExtractionService
                 @snapshot_id, @source_file_id, @output_path, @working_directory, @argv_json, @argv_hash, @compiler,
                 @language_standard, @target_triple, @sysroot, @defines_hash, @include_paths_hash, @command_origin, @command_text
             )
-            ON CONFLICT (snapshot_id, source_file_id, argv_hash, (COALESCE(output_path, ''))) DO UPDATE SET
+            ON CONFLICT (snapshot_id, source_file_id, argv_hash, output_path) DO UPDATE SET
                 command_text = EXCLUDED.command_text
             RETURNING build_config_id;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", buildConfig.SnapshotId);
         cmd.Parameters.AddWithValue("source_file_id", buildConfig.SourceFileId);
-        cmd.Parameters.AddWithValue("output_path", (object?)buildConfig.OutputPath ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("output_path", buildConfig.OutputPath ?? string.Empty);
         cmd.Parameters.AddWithValue("working_directory", buildConfig.WorkingDirectory);
         cmd.Parameters.AddWithValue("argv_json", NpgsqlDbType.Jsonb, buildConfig.ArgvJson.GetRawText());
         cmd.Parameters.AddWithValue("argv_hash", buildConfig.ArgvHash);
@@ -1325,7 +1321,7 @@ public class ExtractionService
     }
 
     private async Task<long> InsertParseContextAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         ParseContext parseContext,
         CancellationToken cancellationToken)
     {
@@ -1341,7 +1337,7 @@ public class ExtractionService
             RETURNING parse_context_id;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", parseContext.SnapshotId);
         cmd.Parameters.AddWithValue("file_id", parseContext.FileId);
         cmd.Parameters.AddWithValue("build_config_id", parseContext.BuildConfigId);
@@ -1354,7 +1350,7 @@ public class ExtractionService
     }
 
     private async Task<long> RecordProvenanceAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         string extractorName,
         string extractionMethod,
         string exactness,
@@ -1368,7 +1364,7 @@ public class ExtractionService
             RETURNING provenance_id;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("extractor_name", extractorName);
         cmd.Parameters.AddWithValue("extraction_method", extractionMethod);
         cmd.Parameters.AddWithValue("exactness", exactness);
@@ -1378,7 +1374,7 @@ public class ExtractionService
     }
 
     private async Task<long> UpsertSymbolAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         Symbol symbol,
         CancellationToken cancellationToken)
     {
@@ -1403,7 +1399,7 @@ public class ExtractionService
             RETURNING symbol_id;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", symbol.SnapshotId);
         cmd.Parameters.AddWithValue("stable_key", symbol.StableKey);
         cmd.Parameters.AddWithValue("kind", symbol.Kind);
@@ -1420,7 +1416,7 @@ public class ExtractionService
     }
 
     private async Task<long> InsertSymbolDeclAsync(
-        NpgsqlConnection connection,
+        DbConnection connection,
         SymbolDecl decl,
         CancellationToken cancellationToken)
     {
@@ -1434,7 +1430,7 @@ public class ExtractionService
             RETURNING decl_id;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", decl.SnapshotId);
         cmd.Parameters.AddWithValue("symbol_id", decl.SymbolId);
         cmd.Parameters.AddWithValue("file_id", decl.FileId);
@@ -1449,8 +1445,8 @@ public class ExtractionService
         return (long)(await cmd.ExecuteScalarAsync(cancellationToken) ?? throw new InvalidOperationException("Failed to insert symbol decl."));
     }
 
-    private static async Task UpdateCanonicalDeclAsync(
-        NpgsqlConnection connection,
+    private async Task UpdateCanonicalDeclAsync(
+        DbConnection connection,
         long symbolId,
         long declId,
         bool isDefinition,
@@ -1460,14 +1456,14 @@ public class ExtractionService
             ? "UPDATE symbol SET canonical_def_id = COALESCE(canonical_def_id, @decl_id) WHERE symbol_id = @symbol_id;"
             : "UPDATE symbol SET canonical_decl_id = COALESCE(canonical_decl_id, @decl_id) WHERE symbol_id = @symbol_id;";
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("decl_id", declId);
         cmd.Parameters.AddWithValue("symbol_id", symbolId);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task InsertRelationAsync(
-        NpgsqlConnection connection,
+    private async Task InsertRelationAsync(
+        DbConnection connection,
         Relation relation,
         CancellationToken cancellationToken)
     {
@@ -1481,7 +1477,7 @@ public class ExtractionService
             ON CONFLICT (snapshot_id, parse_context_id, from_symbol_id, to_symbol_id, kind) DO NOTHING;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", relation.SnapshotId);
         cmd.Parameters.AddWithValue("parse_context_id", relation.ParseContextId);
         cmd.Parameters.AddWithValue("from_symbol_id", relation.FromSymbolId);
@@ -1491,8 +1487,8 @@ public class ExtractionService
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task InsertOccurrenceAsync(
-        NpgsqlConnection connection,
+    private async Task InsertOccurrenceAsync(
+        DbConnection connection,
         Occurrence occurrence,
         CancellationToken cancellationToken)
     {
@@ -1505,7 +1501,7 @@ public class ExtractionService
             );
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", occurrence.SnapshotId);
         cmd.Parameters.AddWithValue("parse_context_id", occurrence.ParseContextId);
         cmd.Parameters.AddWithValue("file_id", occurrence.FileId);
@@ -1518,8 +1514,8 @@ public class ExtractionService
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task<long> InsertCallsiteAsync(
-        NpgsqlConnection connection,
+    private async Task<long> InsertCallsiteAsync(
+        DbConnection connection,
         Callsite callsite,
         CancellationToken cancellationToken)
     {
@@ -1533,7 +1529,7 @@ public class ExtractionService
             RETURNING callsite_id;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", callsite.SnapshotId);
         cmd.Parameters.AddWithValue("parse_context_id", callsite.ParseContextId);
         cmd.Parameters.AddWithValue("file_id", callsite.FileId);
@@ -1545,8 +1541,8 @@ public class ExtractionService
         return (long)(await cmd.ExecuteScalarAsync(cancellationToken) ?? throw new InvalidOperationException("Failed to insert callsite."));
     }
 
-    private static async Task InsertCallTargetAsync(
-        NpgsqlConnection connection,
+    private async Task InsertCallTargetAsync(
+        DbConnection connection,
         CallTarget callTarget,
         CancellationToken cancellationToken)
     {
@@ -1560,7 +1556,7 @@ public class ExtractionService
             ON CONFLICT (snapshot_id, callsite_id, callee_symbol_id, rank) DO NOTHING;
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", callTarget.SnapshotId);
         cmd.Parameters.AddWithValue("callsite_id", callTarget.CallsiteId);
         cmd.Parameters.AddWithValue("callee_symbol_id", callTarget.CalleeSymbolId);
@@ -1571,8 +1567,8 @@ public class ExtractionService
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task InsertFileDependencyIfNewAsync(
-        NpgsqlConnection connection,
+    private async Task InsertFileDependencyIfNewAsync(
+        DbConnection connection,
         ExtractionState state,
         FileDependency dependency,
         CancellationToken cancellationToken)
@@ -1594,7 +1590,7 @@ public class ExtractionService
             );
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
         cmd.Parameters.AddWithValue("snapshot_id", dependency.SnapshotId);
         cmd.Parameters.AddWithValue("parse_context_id", dependency.ParseContextId);
         cmd.Parameters.AddWithValue("from_file_id", dependency.FromFileId);
