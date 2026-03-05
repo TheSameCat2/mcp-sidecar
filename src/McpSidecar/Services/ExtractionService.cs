@@ -89,6 +89,9 @@ public class ExtractionService
     }
 
     public async Task<long?> RunInitialExtractionAsync(CancellationToken cancellationToken = default)
+        => await RunInitialExtractionAsync(cancellationToken, progress: null);
+
+    public async Task<long?> RunInitialExtractionAsync(CancellationToken cancellationToken, IProgress<ExtractionProgress>? progress)
     {
         if (!_connectionFactory.IsConfigured)
         {
@@ -108,6 +111,9 @@ public class ExtractionService
             compileCommands = DiscoverFallbackCompileCommands().ToList();
             _logger.LogInformation("No compile_commands.json entries found, using inferred source files: {Count}", compileCommands.Count);
         }
+
+        var totalFiles = compileCommands.Count;
+        progress?.Report(new ExtractionProgress { TotalFiles = totalFiles, CurrentPhase = "Initializing" });
 
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken);
 
@@ -216,6 +222,13 @@ public class ExtractionService
         try
         {
             await SeedBuildAndParseContextAsync(connection, state, compileCommands, cancellationToken);
+            progress?.Report(new ExtractionProgress 
+            { 
+                TotalFiles = totalFiles, 
+                FilesProcessed = state.SourceFiles.Count, 
+                CurrentPhase = "Symbols" 
+            });
+            
             if (state.DefaultBuildConfigId == 0)
             {
                 _logger.LogWarning("No source files were discovered for snapshot {SnapshotId}; skipping fact extraction stages.", state.SnapshotId);
@@ -225,8 +238,32 @@ public class ExtractionService
             }
 
             await ExtractSymbolsAsync(connection, state, cancellationToken);
+            progress?.Report(new ExtractionProgress 
+            { 
+                TotalFiles = totalFiles, 
+                FilesProcessed = state.SourceFiles.Count, 
+                SymbolsExtracted = state.SymbolIdsByStableKey.Count,
+                CurrentPhase = "References" 
+            });
+            
             await ExtractOccurrencesAsync(connection, state, cancellationToken);
+            progress?.Report(new ExtractionProgress 
+            { 
+                TotalFiles = totalFiles, 
+                FilesProcessed = state.SourceFiles.Count, 
+                SymbolsExtracted = state.SymbolIdsByStableKey.Count,
+                CurrentPhase = "CallHierarchy" 
+            });
+            
             await ExtractCallHierarchyAsync(connection, state, cancellationToken);
+            progress?.Report(new ExtractionProgress 
+            { 
+                TotalFiles = totalFiles, 
+                FilesProcessed = state.SourceFiles.Count, 
+                SymbolsExtracted = state.SymbolIdsByStableKey.Count,
+                CurrentPhase = "Dependencies" 
+            });
+            
             await ExtractFileDependenciesAsync(connection, state, cancellationToken);
 
             _logger.LogInformation(
@@ -236,6 +273,14 @@ public class ExtractionService
                 state.SymbolIdsByStableKey.Count,
                 state.SymbolSeeds.Count);
 
+            progress?.Report(new ExtractionProgress 
+            { 
+                TotalFiles = totalFiles, 
+                FilesProcessed = state.SourceFiles.Count, 
+                SymbolsExtracted = state.SymbolIdsByStableKey.Count,
+                CurrentPhase = "Complete" 
+            });
+            
             await UpdateSnapshotStatusAsync(connection, state.SnapshotId, "complete", cancellationToken);
             await ArchiveOldSnapshotsAsync(connection, 5, cancellationToken);
             return snapshotId;
