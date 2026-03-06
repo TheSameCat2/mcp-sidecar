@@ -222,9 +222,6 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
     private static async Task<string> LoadEmbeddedSchemaAsync(CancellationToken cancellationToken)
     {
         var assembly = typeof(DbConnectionFactory).Assembly;
-
-        // Try to find schema file in embedded resources
-        // The resource name includes the project namespace
         var resourceName = assembly.GetManifestResourceNames()
             .FirstOrDefault(n => n.EndsWith("schema-sqlite.sql", StringComparison.OrdinalIgnoreCase));
 
@@ -234,14 +231,21 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
             throw new InvalidOperationException($"Could not find embedded schema resource. Available: {available}");
         }
 
-        using var stream = assembly.GetManifestResourceStream(resourceName);
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
         if (stream == null)
         {
             throw new InvalidOperationException($"Could not load embedded resource: {resourceName}");
         }
 
         using var reader = new StreamReader(stream);
-        return await reader.ReadToEndAsync();
+        var schema = await reader.ReadToEndAsync(cancellationToken);
+        
+        if (string.IsNullOrWhiteSpace(schema))
+        {
+            throw new InvalidOperationException("Schema SQL is empty");
+        }
+        
+        return schema;
     }
 
     private string CreateSqliteConnectionString()
