@@ -87,7 +87,9 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
             var isInitialized = await IsSqliteSchemaInitializedAsync(connection, cancellationToken);
             if (!isInitialized)
             {
+                _logger.LogInformation("Database not initialized, loading schema...");
                 var schemaSql = await LoadEmbeddedSchemaAsync(cancellationToken);
+                _logger.LogDebug("Schema loaded, {Length} characters", schemaSql.Length);
                 await using var command = connection.CreateCommand();
                 command.CommandText = schemaSql;
                 await command.ExecuteNonQueryAsync(cancellationToken);
