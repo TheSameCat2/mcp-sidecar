@@ -136,7 +136,7 @@ Below is the working roadmap. Items are intentionally checkable so automated age
 - [x] Resume interrupted indexing jobs
 - [x] Detect stale compile_commands entries
 - [x] Detect parse failures and report clearly
-- [ ] Validate symbol identity across re‑index runs (Phase 2)
+- [x] Validate symbol identity across re‑index runs (v0.2.0)
 
 ### Workspace Detection
 - [x] Auto‑detect project root
@@ -149,10 +149,6 @@ Below is the working roadmap. Items are intentionally checkable so automated age
 ## Phase 2 — Trust & Provenance
 
 Goal: Every fact returned should explain **why it is trustworthy**.
-
-### Deferred from Phase 1
-- [ ] Validate symbol identity across re‑index runs
-- [ ] Support multi‑workspace indexing
 
 ### Provenance Metadata
 - [ ] Attach provenance metadata to results
