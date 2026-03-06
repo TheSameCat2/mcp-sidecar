@@ -63,13 +63,17 @@ jobs:
 
     - name: Publish
       run: |
+        # Strip 'v' prefix from tag for version (e.g., v0.1.0 -> 0.1.0)
+        VERSION="${{ github.ref_name }}"
+        VERSION="${VERSION#v}"
+        
         dotnet publish \
           --configuration Release \
           --runtime ${{ matrix.runtime }} \
           --self-contained true \
           -p:PublishSingleFile=true \
           -p:PublishTrimmed=true \
-          -p:VersionPrefix=${{ github.ref_name }} \
+          -p:VersionPrefix=$VERSION \
           -p:SourceRevisionId=${{ github.sha }} \
           -p:BuildDate=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
           --output ./publish
