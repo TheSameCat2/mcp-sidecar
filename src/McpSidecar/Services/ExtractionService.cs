@@ -770,11 +770,13 @@ public class ExtractionService
     {
         foreach (var sourcePath in state.SourceFiles.Distinct(StringComparer.Ordinal))
         {
-            var sourceFileId = await EnsureFileAsync(connection, state, sourcePath, cancellationToken);
-            var parseContextId = await EnsureParseContextForFileAsync(connection, state, sourcePath, sourceFileId, cancellationToken);
-            var sourceUri = PathToFileUri(sourcePath);
+            try
+            {
+                var sourceFileId = await EnsureFileAsync(connection, state, sourcePath, cancellationToken);
+                var parseContextId = await EnsureParseContextForFileAsync(connection, state, sourcePath, sourceFileId, cancellationToken);
+                var sourceUri = PathToFileUri(sourcePath);
 
-            await EnsureFileOpenAsync(state, sourcePath, cancellationToken);
+                await EnsureFileOpenAsync(state, sourcePath, cancellationToken);
 
             var linksResponse = await _clangd.SendRequestAsync(
                 "textDocument/documentLink",
@@ -2483,7 +2485,25 @@ public class ExtractionService
 
     private static string PathToFileUri(string path)
     {
-        return new Uri(path).AbsoluteUri;
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            throw new ArgumentException("Path cannot be null or empty", nameof(path));
+        }
+
+        // Ensure path is absolute
+        var absolutePath = Path.IsPathRooted(path) ? path : Path.GetFullPath(path);
+        
+        // Normalize path separators
+        absolutePath = absolutePath.Replace('\\', '/');
+        
+        // Build file:// URI
+        var builder = new UriBuilder
+        {
+            Scheme = "file",
+            Path = absolutePath
+        };
+        
+        return builder.Uri.AbsoluteUri;
     }
 
     private static bool UriLooksLikeFile(string value)
