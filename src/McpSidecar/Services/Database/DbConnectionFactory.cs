@@ -127,21 +127,30 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
 
     private static async Task<int> GetSchemaVersionAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT version
-            FROM schema_version
-            ORDER BY version DESC
-            LIMIT 1;
-            """;
-
-        var result = await command.ExecuteScalarAsync(cancellationToken);
-        if (result == null || result == DBNull.Value)
+        try
         {
-            return 0;
-        }
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT version
+                FROM schema_version
+                ORDER BY version DESC
+                LIMIT 1;
+                """;
 
-        return Convert.ToInt32(result);
+            var result = await command.ExecuteScalarAsync(cancellationToken);
+            if (result == null || result == DBNull.Value)
+            {
+                return 0;
+            }
+
+            return Convert.ToInt32(result);
+        }
+        catch (SqliteException)
+        {
+            // schema_version table doesn't exist yet (pre-v0.2.0 database)
+            // If we got here, snapshot table exists, so assume version 1
+            return 1;
+        }
     }
 
     /// <summary>
@@ -162,6 +171,17 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
             
             await using var command = connection.CreateCommand();
             command.CommandText = """
+                -- Ensure schema_version table exists (for pre-v0.2.0 databases)
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    description TEXT NOT NULL
+                );
+                
+                -- Add version 1 if not present
+                INSERT OR IGNORE INTO schema_version (version, description) 
+                VALUES (1, 'Initial schema (migrated)');
+                
                 CREATE TABLE IF NOT EXISTS extraction_progress (
                     snapshot_id INTEGER PRIMARY KEY,
                     status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'interrupted', 'failed')),
