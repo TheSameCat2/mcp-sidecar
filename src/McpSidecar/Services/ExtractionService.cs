@@ -2114,6 +2114,48 @@ public class ExtractionService
                 Origin: "exact"));
         }
 
+        // Validate compile_commands.json: check for missing files and age
+        if (result.Count > 0)
+        {
+            var ccFileInfo = new FileInfo(compileCommandsPath);
+            var age = DateTime.Now - ccFileInfo.LastWriteTime;
+            var ageDays = (int)age.TotalDays;
+
+            // Warn if compile_commands.json is old
+            if (ageDays > 30)
+            {
+                _logger.LogWarning(
+                    "compile_commands.json is {AgeDays} days old. Consider regenerating with: cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+                    ageDays);
+            }
+
+            // Check for missing files (sample first 100 to avoid slow IO on large projects)
+            var toCheck = result.Count > 100 ? result.Take(100).ToList() : result;
+            var missing = new List<string>();
+            foreach (var entry in toCheck)
+            {
+                if (!File.Exists(entry.SourceFile))
+                {
+                    missing.Add(entry.SourceFile);
+                }
+            }
+
+            // Log warning if we found missing files in the sample
+            if (missing.Count > 0)
+            {
+                var estimatedMissing = missing.Count * result.Count / toCheck.Count;
+                _logger.LogWarning(
+                    "compile_commands.json contains missing files: {SampleCount} of {SampleTotal} sampled files not found (~{EstimatedTotal} estimated total)",
+                    missing.Count, toCheck.Count, estimatedMissing);
+                
+                // Log first few missing files
+                foreach (var file in missing.Take(3))
+                {
+                    _logger.LogDebug("Missing file: {File}", file);
+                }
+            }
+        }
+
         return result;
     }
 

@@ -7,6 +7,7 @@ using McpSidecar.Services;
 // Parse CLI args
 var isExtractOnly = args.Contains("--extract") || args.Contains("-e");
 var isForce = args.Contains("--force");
+var isValidateOnly = args.Contains("--validate-compile-commands") || args.Contains("--validate");
 var showHelp = args.Contains("--help") || args.Contains("-h");
 
 // Parse explicit paths
@@ -28,6 +29,7 @@ if (showHelp)
     Console.WriteLine("Options:");
     Console.WriteLine("  --extract, -e               Run extraction and exit (standalone mode)");
     Console.WriteLine("  --force                     Force full re-extraction (ignore file hashes)");
+    Console.WriteLine("  --validate-compile-commands Validate compile_commands.json and show report");
     Console.WriteLine("  --workspace, -w <path>      Explicit workspace root directory");
     Console.WriteLine("  --compile-commands, -c <path>  Explicit compile_commands.json path");
     Console.WriteLine("  --help, -h                  Show this help message");
@@ -39,6 +41,11 @@ if (showHelp)
     Console.WriteLine("Auto-detection:");
     Console.WriteLine("  Workspace root: Walks up from current directory looking for .git, CMakeLists.txt, etc.");
     Console.WriteLine("  compile_commands.json: Searches workspace root, build/, cmake-build-*/, out/build/");
+    Console.WriteLine();
+    Console.WriteLine("Examples:");
+    Console.WriteLine("  mcp-sidecar --extract                    # Extract from current directory");
+    Console.WriteLine("  mcp-sidecar --validate-compile-commands  # Check compile_commands.json health");
+    Console.WriteLine("  mcp-sidecar --extract --force            # Force full re-extraction");
     Console.WriteLine();
     return;
 }
@@ -62,6 +69,98 @@ if (isExtractOnly)
     Console.WriteLine($"Workspace: {workspaceRoot}");
     Console.WriteLine($"Compile commands: {compileCommandsPath ?? "Not found"}");
     Console.WriteLine();
+    
+    // Validate compile_commands.json if found
+    if (compileCommandsPath != null)
+    {
+        var (total, valid, missing, ageDays) = workspaceService.ValidateCompileCommands(compileCommandsPath);
+        
+        if (ageDays > 30)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"⚠ compile_commands.json is {ageDays} days old");
+            Console.WriteLine($"  Consider regenerating with: cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
+            Console.ResetColor();
+            Console.WriteLine();
+        }
+        
+        if (missing.Count > 0)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"⚠ {missing.Count} of {total} files in compile_commands.json are missing:");
+            foreach (var file in missing.Take(5))
+            {
+                Console.WriteLine($"  - {file}");
+            }
+            if (missing.Count > 5)
+            {
+                Console.WriteLine($"  ... and {missing.Count - 5} more");
+            }
+            Console.ResetColor();
+            Console.WriteLine();
+        }
+    }
+}
+
+// --validate-compile-commands mode: validate and exit
+if (isValidateOnly)
+{
+    if (compileCommandsPath == null)
+    {
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine("✗ compile_commands.json not found");
+        Console.ResetColor();
+        return;
+    }
+    
+    Console.WriteLine($"Validating: {compileCommandsPath}");
+    Console.WriteLine();
+    
+    var (total, valid, missing, ageDays) = workspaceService.ValidateCompileCommands(compileCommandsPath);
+    
+    Console.WriteLine($"Total entries: {total}");
+    Console.WriteLine($"Valid files:   {valid}");
+    Console.WriteLine($"Missing files: {missing.Count}");
+    Console.WriteLine($"Age:           {ageDays} days");
+    Console.WriteLine();
+    
+    if (missing.Count > 0)
+    {
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine("Missing files:");
+        foreach (var file in missing)
+        {
+            Console.WriteLine($"  - {file}");
+        }
+        Console.ResetColor();
+        Console.WriteLine();
+    }
+    
+    if (ageDays > 30)
+    {
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine($"⚠ compile_commands.json is {ageDays} days old");
+        Console.WriteLine("  Consider regenerating with:");
+        Console.WriteLine("    cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
+        Console.ResetColor();
+        Console.WriteLine();
+    }
+    
+    // Summary
+    if (missing.Count == 0 && ageDays <= 30)
+    {
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine("✓ compile_commands.json looks healthy");
+        Console.ResetColor();
+    }
+    else
+    {
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine("⚠ compile_commands.json may need regeneration");
+        Console.ResetColor();
+    }
+    
+    return;
 }
 
 // --extract mode: run extraction standalone with progress, then exit
