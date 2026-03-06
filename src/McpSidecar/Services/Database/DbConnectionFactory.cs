@@ -95,7 +95,6 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
             }
             else
             {
-                // Check schema version for potential migrations
                 var currentVersion = await GetSchemaVersionAsync(connection, cancellationToken);
                 _logger.LogDebug("SQLite schema version: {Version}", currentVersion);
             }
@@ -121,6 +120,50 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
 
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result != null && result != DBNull.Value;
+    }
+
+    private static async Task<int> GetSchemaVersionAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT version
+            FROM schema_version
+            ORDER BY version DESC
+            LIMIT 1;
+            """;
+
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        if (result == null || result == DBNull.Value)
+        {
+            return 0;
+        }
+
+        return Convert.ToInt32(result);
+    }
+
+    private static async Task<string> LoadEmbeddedSchemaAsync(CancellationToken cancellationToken)
+    {
+        var assembly = typeof(DbConnectionFactory).Assembly;
+
+        // Try to find schema file in embedded resources
+        // The resource name includes the project namespace
+        var resourceName = assembly.GetManifestResourceNames()
+            .FirstOrDefault(n => n.EndsWith("schema-sqlite.sql", StringComparison.OrdinalIgnoreCase));
+
+        if (resourceName == null)
+        {
+            var available = string.Join(", ", assembly.GetManifestResourceNames());
+            throw new InvalidOperationException($"Could not find embedded schema resource. Available: {available}");
+        }
+
+        using var stream = assembly.GetManifestResourceStream(resourceName);
+        if (stream == null)
+        {
+            throw new InvalidOperationException($"Could not load embedded resource: {resourceName}");
+        }
+
+        using var reader = new StreamReader(stream);
+        return await reader.ReadToEndAsync();
     }
 
     private string CreateSqliteConnectionString()
@@ -157,46 +200,6 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
         }
 
         return NormalizePath(resolved);
-    }
-
-    /// <summary>
-    /// Loads the SQLite schema from embedded resource.
-    /// </summary>
-    private static async Task<string> LoadEmbeddedSchemaAsync(CancellationToken cancellationToken)
-    {
-        var assembly = Assembly.GetExecutingAssembly();
-        var resourceName = "McpSidecar.Schema.schema-sqlite.sql";
-
-        await using var stream = assembly.GetManifestResourceStream(resourceName);
-        if (stream == null)
-        {
-            // List available resources for debugging
-            var availableResources = assembly.GetManifestResourceNames();
-            var availableList = string.Join(", ", availableResources);
-            throw new InvalidOperationException($"Embedded resource not found: {resourceName}. Available: {availableList}");
-        }
-
-        using var reader = new StreamReader(stream);
-        return await reader.ReadToEndAsync(cancellationToken);
-    }
-
-    /// <summary>
-    /// Gets the current schema version from the database.
-    /// </summary>
-    private static async Task<int> GetSchemaVersionAsync(SqliteConnection connection, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT MAX(version) FROM schema_version;";
-            var result = await command.ExecuteScalarAsync(cancellationToken);
-            return result == null || result == DBNull.Value ? 0 : Convert.ToInt32(result);
-        }
-        catch (SqliteException)
-        {
-            // schema_version table doesn't exist yet
-            return 0;
-        }
     }
 
     private static string ExpandHomePath(string path)
