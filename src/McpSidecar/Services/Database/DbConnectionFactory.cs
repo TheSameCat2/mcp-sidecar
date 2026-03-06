@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.Sqlite;
@@ -86,12 +87,17 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
             var isInitialized = await IsSqliteSchemaInitializedAsync(connection, cancellationToken);
             if (!isInitialized)
             {
-                var schemaPath = ResolveSqliteSchemaPath();
-                var schemaSql = await File.ReadAllTextAsync(schemaPath, cancellationToken);
+                var schemaSql = await LoadEmbeddedSchemaAsync(cancellationToken);
                 await using var command = connection.CreateCommand();
                 command.CommandText = schemaSql;
                 await command.ExecuteNonQueryAsync(cancellationToken);
                 _logger.LogInformation("Initialized SQLite schema: {DatabasePath}", _sqliteDatabasePath);
+            }
+            else
+            {
+                // Check schema version for potential migrations
+                var currentVersion = await GetSchemaVersionAsync(connection, cancellationToken);
+                _logger.LogDebug("SQLite schema version: {Version}", currentVersion);
             }
 
             _sqliteInitialized = true;
@@ -153,25 +159,44 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
         return NormalizePath(resolved);
     }
 
-    private static string ResolveSqliteSchemaPath()
+    /// <summary>
+    /// Loads the SQLite schema from embedded resource.
+    /// </summary>
+    private static async Task<string> LoadEmbeddedSchemaAsync(CancellationToken cancellationToken)
     {
-        var candidates = new[]
-        {
-            Path.Combine(AppContext.BaseDirectory, "Schema", "schema-sqlite.sql"),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Schema", "schema-sqlite.sql")),
-            Path.Combine(Directory.GetCurrentDirectory(), "src", "McpSidecar", "Schema", "schema-sqlite.sql"),
-            Path.Combine(Directory.GetCurrentDirectory(), "Schema", "schema-sqlite.sql")
-        };
+        var assembly = Assembly.GetExecutingAssembly();
+        var resourceName = "McpSidecar.Schema.schema-sqlite.sql";
 
-        foreach (var candidate in candidates)
+        await using var stream = assembly.GetManifestResourceStream(resourceName);
+        if (stream == null)
         {
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
+            // List available resources for debugging
+            var availableResources = assembly.GetManifestResourceNames();
+            var availableList = string.Join(", ", availableResources);
+            throw new InvalidOperationException($"Embedded resource not found: {resourceName}. Available: {availableList}");
         }
 
-        throw new FileNotFoundException("Unable to locate SQLite schema file (schema-sqlite.sql).");
+        using var reader = new StreamReader(stream);
+        return await reader.ReadToEndAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Gets the current schema version from the database.
+    /// </summary>
+    private static async Task<int> GetSchemaVersionAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT MAX(version) FROM schema_version;";
+            var result = await command.ExecuteScalarAsync(cancellationToken);
+            return result == null || result == DBNull.Value ? 0 : Convert.ToInt32(result);
+        }
+        catch (SqliteException)
+        {
+            // schema_version table doesn't exist yet
+            return 0;
+        }
     }
 
     private static string ExpandHomePath(string path)

@@ -1,5 +1,15 @@
 PRAGMA foreign_keys = ON;
 
+-- Schema version tracking for migrations
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    description TEXT NOT NULL
+);
+
+-- Initial schema version record
+INSERT INTO schema_version (version, description) VALUES (1, 'Initial schema');
+
 CREATE TABLE IF NOT EXISTS snapshot (
     snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_root TEXT NOT NULL,
