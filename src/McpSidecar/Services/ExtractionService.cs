@@ -242,9 +242,22 @@ public class ExtractionService
             snapshotId,
             _clangd.WorkspaceRoot);
 
+        // Initialize extraction progress tracking
+        await UpdateExtractionProgressAsync(
+            connection, snapshotId, "running", totalFiles, 
+            state.SourceFiles.Count, 0, null, null, cancellationToken);
+
         try
         {
             await SeedBuildAndParseContextAsync(connection, state, compileCommands, cancellationToken);
+            
+            // Update progress after seeding
+            await UpdateExtractionProgressAsync(
+                connection, snapshotId, "running", totalFiles,
+                state.SourceFiles.Count, 0, 
+                state.SourceFiles.Count > 0 ? state.SourceFiles.Last() : null, 
+                null, cancellationToken);
+            
             progress?.Report(new ExtractionProgress 
             { 
                 TotalFiles = totalFiles, 
@@ -304,13 +317,37 @@ public class ExtractionService
                 CurrentPhase = "Complete" 
             });
             
+            // Mark extraction as completed
+            await UpdateExtractionProgressAsync(
+                connection, state.SnapshotId, "completed", totalFiles,
+                state.SourceFiles.Count, 0, null, null, cancellationToken);
+            
             await UpdateSnapshotStatusAsync(connection, state.SnapshotId, "complete", cancellationToken);
             await ArchiveOldSnapshotsAsync(connection, 5, cancellationToken);
             return snapshotId;
         }
-        catch
+        catch (OperationCanceledException)
         {
+            // Mark extraction as interrupted on cancellation
+            await UpdateExtractionProgressAsync(
+                connection, state.SnapshotId, "interrupted", totalFiles,
+                state.SourceFiles.Count, 0,
+                state.SourceFiles.Count > 0 ? state.SourceFiles.Last() : null,
+                "Extraction cancelled by user", cancellationToken);
+            
             await UpdateSnapshotStatusAsync(connection, state.SnapshotId, "failed", cancellationToken);
+            _logger.LogWarning("Extraction interrupted by user for snapshot {SnapshotId}", state.SnapshotId);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Mark extraction as failed on error
+            await UpdateExtractionProgressAsync(
+                connection, state.SnapshotId, "failed", totalFiles,
+                state.SourceFiles.Count, 0, null, ex.Message, cancellationToken);
+            
+            await UpdateSnapshotStatusAsync(connection, state.SnapshotId, "failed", cancellationToken);
+            _logger.LogError(ex, "Extraction failed for snapshot {SnapshotId}", state.SnapshotId);
             throw;
         }
     }
@@ -1504,6 +1541,82 @@ public class ExtractionService
         cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
         cmd.Parameters.AddWithValue("index_status", indexStatus);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Creates or updates extraction progress record for resume capability.
+    /// </summary>
+    private async Task UpdateExtractionProgressAsync(
+        DbConnection connection,
+        long snapshotId,
+        string status,
+        int filesTotal,
+        int filesProcessed,
+        int filesFailed,
+        string? lastFileProcessed,
+        string? errorMessage,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO extraction_progress (
+                snapshot_id, status, files_total, files_processed, files_failed,
+                last_file_processed, error_message, started_at
+            )
+            VALUES (
+                @snapshot_id, @status, @files_total, @files_processed, @files_failed,
+                @last_file_processed, @error_message, CURRENT_TIMESTAMP
+            )
+            ON CONFLICT(snapshot_id) DO UPDATE SET
+                status = @status,
+                files_total = @files_total,
+                files_processed = @files_processed,
+                files_failed = @files_failed,
+                last_file_processed = @last_file_processed,
+                error_message = @error_message,
+                completed_at = CASE WHEN @status IN ('completed', 'interrupted', 'failed') 
+                                    THEN CURRENT_TIMESTAMP 
+                                    ELSE NULL END;
+            """;
+
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
+        cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
+        cmd.Parameters.AddWithValue("status", status);
+        cmd.Parameters.AddWithValue("files_total", filesTotal);
+        cmd.Parameters.AddWithValue("files_processed", filesProcessed);
+        cmd.Parameters.AddWithValue("files_failed", filesFailed);
+        cmd.Parameters.AddWithValue("last_file_processed", (object?)lastFileProcessed ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("error_message", (object?)errorMessage ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Gets extraction progress for a snapshot (for resume capability).
+    /// </summary>
+    private async Task<(int FilesProcessed, int FilesFailed, string? LastFileProcessed)?> GetExtractionProgressAsync(
+        DbConnection connection,
+        long snapshotId,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT files_processed, files_failed, last_file_processed
+            FROM extraction_progress
+            WHERE snapshot_id = @snapshot_id
+              AND status = 'interrupted';
+            """;
+
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
+        cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            var filesProcessed = reader.GetInt32(0);
+            var filesFailed = reader.GetInt32(1);
+            var lastFileProcessed = reader.IsDBNull(2) ? null : reader.GetString(2);
+            return (filesProcessed, filesFailed, lastFileProcessed);
+        }
+
+        return null;
     }
 
     private async Task<long> InsertSnapshotAsync(

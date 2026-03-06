@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 
 -- Initial schema version record
 INSERT INTO schema_version (version, description) VALUES (1, 'Initial schema');
+INSERT INTO schema_version (version, description) VALUES (2, 'Added extraction_progress table for resume capability');
 
 CREATE TABLE IF NOT EXISTS snapshot (
     snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,6 +27,22 @@ CREATE TABLE IF NOT EXISTS snapshot (
 
 CREATE INDEX IF NOT EXISTS ix_snapshot_repo_root_current ON snapshot(repo_root, is_archived, created_at DESC, snapshot_id DESC);
 CREATE INDEX IF NOT EXISTS ix_snapshot_workspace_hash ON snapshot(workspace_hash);
+
+-- Extraction progress tracking for resume capability
+CREATE TABLE IF NOT EXISTS extraction_progress (
+    snapshot_id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'interrupted', 'failed')),
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    files_total INTEGER NOT NULL DEFAULT 0,
+    files_processed INTEGER NOT NULL DEFAULT 0,
+    files_failed INTEGER NOT NULL DEFAULT 0,
+    last_file_processed TEXT,
+    error_message TEXT,
+    FOREIGN KEY (snapshot_id) REFERENCES snapshot(snapshot_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS ix_extraction_progress_status ON extraction_progress(status);
 
 CREATE TABLE IF NOT EXISTS file (
     file_id INTEGER PRIMARY KEY AUTOINCREMENT,

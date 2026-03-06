@@ -97,6 +97,9 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
             {
                 var currentVersion = await GetSchemaVersionAsync(connection, cancellationToken);
                 _logger.LogDebug("SQLite schema version: {Version}", currentVersion);
+                
+                // Apply migrations if needed
+                await ApplyMigrationsAsync(connection, currentVersion, cancellationToken);
             }
 
             _sqliteInitialized = true;
@@ -139,6 +142,47 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
         }
 
         return Convert.ToInt32(result);
+    }
+
+    /// <summary>
+    /// Applies schema migrations if the database is on an older version.
+    /// </summary>
+    private async Task ApplyMigrationsAsync(SqliteConnection connection, int currentVersion, CancellationToken cancellationToken)
+    {
+        if (currentVersion >= 2)
+        {
+            // Already up to date
+            return;
+        }
+
+        // Migration 2: Add extraction_progress table
+        if (currentVersion < 2)
+        {
+            _logger.LogInformation("Applying migration: version 2 (extraction_progress table)");
+            
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE IF NOT EXISTS extraction_progress (
+                    snapshot_id INTEGER PRIMARY KEY,
+                    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'interrupted', 'failed')),
+                    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TEXT,
+                    files_total INTEGER NOT NULL DEFAULT 0,
+                    files_processed INTEGER NOT NULL DEFAULT 0,
+                    files_failed INTEGER NOT NULL DEFAULT 0,
+                    last_file_processed TEXT,
+                    error_message TEXT,
+                    FOREIGN KEY (snapshot_id) REFERENCES snapshot(snapshot_id) ON DELETE CASCADE
+                );
+                
+                CREATE INDEX IF NOT EXISTS ix_extraction_progress_status ON extraction_progress(status);
+                
+                INSERT INTO schema_version (version, description) VALUES (2, 'Added extraction_progress table for resume capability');
+                """;
+            
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            _logger.LogInformation("Migration to version 2 complete");
+        }
     }
 
     private static async Task<string> LoadEmbeddedSchemaAsync(CancellationToken cancellationToken)
