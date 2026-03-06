@@ -1,8 +1,6 @@
 using System.Data.Common;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
-using Npgsql;
-using NpgsqlTypes;
 
 namespace McpSidecar.Services.Database;
 
@@ -19,11 +17,6 @@ public static class IDbConnectionExtensions
     {
         var normalizedValue = NormalizeParameterValue(parameters, value);
 
-        if (parameters is NpgsqlParameterCollection npgsqlParameters)
-        {
-            return npgsqlParameters.AddWithValue(parameterName, normalizedValue);
-        }
-
         if (parameters is SqliteParameterCollection sqliteParameters)
         {
             var effectiveName = parameterName.StartsWith('@') ? parameterName : $"@{parameterName}";
@@ -31,16 +24,6 @@ public static class IDbConnectionExtensions
         }
 
         throw new NotSupportedException($"Unsupported parameter collection type: {parameters.GetType().FullName}");
-    }
-
-    public static DbParameter AddWithValue(this DbParameterCollection parameters, string parameterName, NpgsqlDbType dbType, object? value)
-    {
-        if (parameters is NpgsqlParameterCollection npgsqlParameters)
-        {
-            return npgsqlParameters.AddWithValue(parameterName, dbType, value ?? DBNull.Value);
-        }
-
-        return parameters.AddWithValue(parameterName, value);
     }
 
     private static object NormalizeParameterValue(DbParameterCollection parameters, object? value)

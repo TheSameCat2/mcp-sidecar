@@ -7,7 +7,6 @@ using System.Text.RegularExpressions;
 using McpSidecar.Models;
 using McpSidecar.Services.Database;
 using Microsoft.Extensions.Logging;
-using NpgsqlTypes;
 
 namespace McpSidecar.Services;
 
@@ -29,6 +28,11 @@ public class ExtractionService
     private readonly ClangdService _clangd;
     private readonly IDbConnectionFactory _connectionFactory;
     private readonly ISqlBuilder _sqlBuilder;
+
+    /// <summary>
+    /// When true, skips incremental indexing and forces full re-extraction.
+    /// </summary>
+    public bool ForceExtraction { get; set; }
 
     public ExtractionService(
         ILogger<ExtractionService> logger,
@@ -317,6 +321,16 @@ public class ExtractionService
         IReadOnlyList<CompileCommandEntry> compileCommands,
         CancellationToken cancellationToken)
     {
+        // Load previous file states for incremental indexing
+        Dictionary<string, PreviousFileState>? previousFileStates = null;
+        if (!ForceExtraction)
+        {
+            previousFileStates = await LoadPreviousFileStatesAsync(connection, cancellationToken);
+        }
+
+        var skippedFiles = 0;
+        var processedFiles = 0;
+
         foreach (var command in compileCommands)
         {
             var sourcePath = NormalizePath(command.SourceFile);
@@ -327,8 +341,28 @@ public class ExtractionService
                 continue;
             }
             
-            var sourceFileId = await EnsureFileAsync(connection, state, sourcePath, cancellationToken);
+            // Incremental indexing: skip files with unchanged content and compile commands
+            long sourceFileId;
+            if (!ForceExtraction && previousFileStates != null)
+            {
+                var currentContentHash = await HashFileAsync(sourcePath, cancellationToken);
+                var currentArgvHash = ComputeSha256(string.Join('\u001f', command.Argv));
+                
+                if (previousFileStates.TryGetValue(sourcePath, out var previousState) &&
+                    string.Equals(currentContentHash, previousState.ContentHash, StringComparison.Ordinal) &&
+                    string.Equals(currentArgvHash, previousState.ArgvHash, StringComparison.Ordinal))
+                {
+                    skippedFiles++;
+                    // Reuse existing file record from previous snapshot
+                    sourceFileId = await EnsureFileAsync(connection, state, sourcePath, cancellationToken);
+                    state.SourceFiles.Add(sourcePath);
+                    continue;
+                }
+            }
+            
+            sourceFileId = await EnsureFileAsync(connection, state, sourcePath, cancellationToken);
             state.SourceFiles.Add(sourcePath);
+            processedFiles++;
 
             var argvJson = JsonSerializer.SerializeToElement(command.Argv);
             var buildConfig = new BuildConfig
@@ -373,6 +407,20 @@ public class ExtractionService
             }
 
             await EnsureFileOpenAsync(state, sourcePath, cancellationToken);
+        }
+
+        if (skippedFiles > 0)
+        {
+            _logger.LogInformation(
+                "Incremental indexing skipped {SkippedCount} unchanged files (total: {Total})",
+                skippedFiles, compileCommands.Count);
+        }
+        else if (!ForceExtraction)
+        {
+            _logger.LogInformation(
+                "Incremental indexing: processing {ProcessedCount} files, skipped {SkippedCount} (total: {Total})",
+                processedFiles, skippedFiles,
+                compileCommands.Count);
         }
     }
 
@@ -1394,6 +1442,50 @@ public class ExtractionService
         return await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Loads file content hashes and argv hashes from the most recent completed snapshot.
+    /// Used for incremental indexing to skip unchanged files.
+    /// </summary>
+    private async Task<Dictionary<string, PreviousFileState>> LoadPreviousFileStatesAsync(
+        DbConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var previousSnapshotId = await GetCurrentSnapshotIdAsync(connection, cancellationToken);
+        if (!previousSnapshotId.HasValue)
+        {
+            return new Dictionary<string, PreviousFileState>();
+        }
+
+        const string sql = """
+            SELECT f.path, f.content_hash, bc.argv_hash
+            FROM file f
+            INNER JOIN build_config bc ON bc.source_file_id = f.file_id
+            WHERE f.snapshot_id = @snapshot_id
+              AND f.content_hash IS NOT NULL
+              AND bc.argv_hash IS NOT NULL;
+            """;
+
+        var result = new Dictionary<string, PreviousFileState>(StringComparer.Ordinal);
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
+        cmd.Parameters.AddWithValue("snapshot_id", previousSnapshotId.Value);
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var path = reader.GetString(0);
+            var contentHash = reader.GetString(1);
+            var argvHash = reader.GetString(2);
+            result[path] = new PreviousFileState 
+            { 
+                ContentHash = contentHash, 
+                ArgvHash = argvHash 
+            };
+        }
+
+        _logger.LogDebug("Loaded {Count} previous file states for incremental indexing", result.Count);
+        return result;
+    }
+
     private async Task UpdateSnapshotStatusAsync(
         DbConnection connection,
         long snapshotId,
@@ -1479,7 +1571,7 @@ public class ExtractionService
         cmd.Parameters.AddWithValue("source_file_id", buildConfig.SourceFileId);
         cmd.Parameters.AddWithValue("output_path", buildConfig.OutputPath ?? string.Empty);
         cmd.Parameters.AddWithValue("working_directory", buildConfig.WorkingDirectory);
-        cmd.Parameters.AddWithValue("argv_json", NpgsqlDbType.Jsonb, buildConfig.ArgvJson.GetRawText());
+        cmd.Parameters.AddWithValue("argv_json", buildConfig.ArgvJson.GetRawText());
         cmd.Parameters.AddWithValue("argv_hash", buildConfig.ArgvHash);
         cmd.Parameters.AddWithValue("compiler", (object?)buildConfig.Compiler ?? DBNull.Value);
         cmd.Parameters.AddWithValue("language_standard", (object?)buildConfig.LanguageStandard ?? DBNull.Value);
@@ -1517,7 +1609,7 @@ public class ExtractionService
         cmd.Parameters.AddWithValue("pp_fingerprint", (object?)parseContext.PpFingerprint ?? DBNull.Value);
         cmd.Parameters.AddWithValue("borrowed_from_build_config_id", (object?)parseContext.BorrowedFromBuildConfigId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("confidence", parseContext.Confidence);
-        cmd.Parameters.AddWithValue("parse_errors_json", NpgsqlDbType.Jsonb, parseContext.ParseErrorsJson.GetRawText());
+        cmd.Parameters.AddWithValue("parse_errors_json", parseContext.ParseErrorsJson.GetRawText());
         return (long)(await cmd.ExecuteScalarAsync(cancellationToken) ?? throw new InvalidOperationException("Failed to insert parse context."));
     }
 
@@ -1541,7 +1633,7 @@ public class ExtractionService
         cmd.Parameters.AddWithValue("extraction_method", extractionMethod);
         cmd.Parameters.AddWithValue("exactness", exactness);
         cmd.Parameters.AddWithValue("confidence", confidence);
-        cmd.Parameters.AddWithValue("evidence_json", NpgsqlDbType.Jsonb, (evidenceJson ?? EmptyObjectJson).GetRawText());
+        cmd.Parameters.AddWithValue("evidence_json", (evidenceJson ?? EmptyObjectJson).GetRawText());
         return (long)(await cmd.ExecuteScalarAsync(cancellationToken) ?? throw new InvalidOperationException("Failed to insert provenance."));
     }
 
@@ -1608,7 +1700,7 @@ public class ExtractionService
         cmd.Parameters.AddWithValue("file_id", decl.FileId);
         cmd.Parameters.AddWithValue("parse_context_id", (object?)decl.ParseContextId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("role", decl.Role);
-        cmd.Parameters.AddWithValue("span", NpgsqlDbType.Jsonb, SerializeSpan(decl.Span));
+        cmd.Parameters.AddWithValue("span", SerializeSpan(decl.Span));
         cmd.Parameters.AddWithValue("signature_text", (object?)decl.SignatureText ?? DBNull.Value);
         cmd.Parameters.AddWithValue("type_text", (object?)decl.TypeText ?? DBNull.Value);
         cmd.Parameters.AddWithValue("doc_comment", (object?)decl.DocComment ?? DBNull.Value);
@@ -1678,7 +1770,7 @@ public class ExtractionService
         cmd.Parameters.AddWithValue("parse_context_id", occurrence.ParseContextId);
         cmd.Parameters.AddWithValue("file_id", occurrence.FileId);
         cmd.Parameters.AddWithValue("symbol_id", occurrence.SymbolId);
-        cmd.Parameters.AddWithValue("span", NpgsqlDbType.Jsonb, SerializeSpan(occurrence.Span));
+        cmd.Parameters.AddWithValue("span", SerializeSpan(occurrence.Span));
         cmd.Parameters.AddWithValue("role_bits", occurrence.RoleBits);
         cmd.Parameters.AddWithValue("via_macro", occurrence.ViaMacro);
         cmd.Parameters.AddWithValue("is_implicit", occurrence.IsImplicit);
@@ -1706,7 +1798,7 @@ public class ExtractionService
         cmd.Parameters.AddWithValue("parse_context_id", callsite.ParseContextId);
         cmd.Parameters.AddWithValue("file_id", callsite.FileId);
         cmd.Parameters.AddWithValue("caller_symbol_id", callsite.CallerSymbolId);
-        cmd.Parameters.AddWithValue("span", NpgsqlDbType.Jsonb, SerializeSpan(callsite.Span));
+        cmd.Parameters.AddWithValue("span", SerializeSpan(callsite.Span));
         cmd.Parameters.AddWithValue("dispatch_kind", callsite.DispatchKind);
         cmd.Parameters.AddWithValue("raw_text", (object?)callsite.RawText ?? DBNull.Value);
         cmd.Parameters.AddWithValue("provenance_id", callsite.ProvenanceId);
@@ -1769,7 +1861,7 @@ public class ExtractionService
         cmd.Parameters.AddWithValue("to_file_id", dependency.ToFileId);
         cmd.Parameters.AddWithValue("directive_kind", dependency.DirectiveKind);
         cmd.Parameters.AddWithValue("literal_text", (object?)dependency.LiteralText ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("span", NpgsqlDbType.Jsonb, SerializeSpan(dependency.Span));
+        cmd.Parameters.AddWithValue("span", SerializeSpan(dependency.Span));
         cmd.Parameters.AddWithValue("is_active", dependency.IsActive);
         cmd.Parameters.AddWithValue("provenance_id", dependency.ProvenanceId);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -2222,6 +2314,12 @@ public class ExtractionService
         int Line,
         int Character,
         int LspKind);
+
+    private sealed class PreviousFileState
+    {
+        public required string ContentHash { get; init; }
+        public required string ArgvHash { get; init; }
+    }
 
     private sealed class ExtractionState
     {

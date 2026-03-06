@@ -445,7 +445,7 @@ public class McpServer
 
         var normalizedFile = NormalizeInputPath(inputFile);
 
-        var explain = await TryGetBuildExplainFromPostgresAsync(normalizedFile, cancellationToken);
+        var explain = await TryGetBuildExplainFromDatabaseAsync(normalizedFile, cancellationToken);
         if (explain == null)
         {
             explain = await TryGetBuildExplainFromCompileCommandsAsync(normalizedFile, cancellationToken);
@@ -468,7 +468,7 @@ public class McpServer
         var keyFlags = ExtractKeyFlags(explain.Argv);
         var buildConfidence = explain.ParseContextConfidence ?? (explain.ResolutionSource switch
         {
-            "postgres" => 0.900m,
+            "database" => 0.900m,
             "clangd.compile_commands" => 0.700m,
             "inferred" => 0.500m,
             _ => 0.650m
@@ -600,7 +600,7 @@ public class McpServer
         var requestedSymbolId = TryGetOptionalInt64Argument(args, "symbol_id", "symbolId");
 
         var normalizedFile = NormalizeInputPath(inputFile);
-        var explain = await TryGetIncludeExplainFromPostgresAsync(
+        var explain = await TryGetIncludeExplainFromDatabaseAsync(
             normalizedFile,
             requestedIdentifier,
             requestedSymbolId,
@@ -2028,7 +2028,7 @@ public class McpServer
         return rows;
     }
 
-    private async Task<IncludeExplainInfo?> TryGetIncludeExplainFromPostgresAsync(
+    private async Task<IncludeExplainInfo?> TryGetIncludeExplainFromDatabaseAsync(
         string normalizedFile,
         string? requestedIdentifier,
         long? requestedSymbolId,
@@ -2838,7 +2838,7 @@ public class McpServer
             .ToList();
     }
 
-    private async Task<BuildExplainInfo?> TryGetBuildExplainFromPostgresAsync(string normalizedFile, CancellationToken cancellationToken)
+    private async Task<BuildExplainInfo?> TryGetBuildExplainFromDatabaseAsync(string normalizedFile, CancellationToken cancellationToken)
     {
         if (!_connectionFactory.IsConfigured)
         {
@@ -2943,7 +2943,7 @@ public class McpServer
             {
                 FilePath = filePath,
                 SourceFile = sourcePath,
-                ResolutionSource = "postgres",
+                ResolutionSource = "database",
                 CommandOrigin = commandOrigin,
                 WorkingDirectory = FirstNonEmpty(GetNullableString(reader, "working_directory"), _clangd.WorkspaceRoot) ?? _clangd.WorkspaceRoot,
                 Argv = argv,

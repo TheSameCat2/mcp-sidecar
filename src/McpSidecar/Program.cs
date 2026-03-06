@@ -6,6 +6,7 @@ using McpSidecar.Services;
 
 // Parse CLI args
 var isExtractOnly = args.Contains("--extract") || args.Contains("-e");
+var isForce = args.Contains("--force");
 var workspaceRoot = args.SkipWhile(a => a != "--workspace" && a != "-w")
                         .Skip(1)
                         .FirstOrDefault()
@@ -18,7 +19,7 @@ workspaceRoot = Path.GetFullPath(workspaceRoot);
 // --extract mode: run extraction standalone with progress, then exit
 if (isExtractOnly)
 {
-    await RunExtractionAsync(workspaceRoot);
+    await RunExtractionAsync(workspaceRoot, isForce);
     return;
 }
 
@@ -47,7 +48,7 @@ var host = builder.Build();
 await host.RunAsync();
 
 // Standalone extraction with progress display
-static async Task RunExtractionAsync(string workspaceRoot)
+static async Task RunExtractionAsync(string workspaceRoot, bool isForce)
 {
     Console.OutputEncoding = System.Text.Encoding.UTF8;
     
@@ -73,6 +74,9 @@ static async Task RunExtractionAsync(string workspaceRoot)
     var clangd = app.Services.GetRequiredService<ClangdService>();
     var extraction = app.Services.GetRequiredService<ExtractionService>();
     var logger = app.Services.GetRequiredService<ILogger<Program>>();
+    
+    // Set force flag if specified
+    extraction.ForceExtraction = isForce;
     
     var cts = new CancellationTokenSource();
     Console.CancelKeyPress += (s, e) => 

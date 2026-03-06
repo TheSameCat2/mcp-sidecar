@@ -4,7 +4,6 @@ using System.Text;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Npgsql;
 
 namespace McpSidecar.Services.Database;
 
@@ -13,7 +12,6 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
     private const string DefaultSqlitePathTemplate = "~/.local/share/mcp-sidecar/{workspace_hash}.db";
 
     private readonly ILogger<DbConnectionFactory> _logger;
-    private readonly string _postgresConnectionString;
     private readonly string _sqliteDatabasePath;
     private readonly SemaphoreSlim _sqliteInitLock = new(1, 1);
     private bool _sqliteInitialized;
@@ -27,51 +25,20 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
         var options = new DatabaseOptions();
         configuration.GetSection("Database").Bind(options);
 
-        var envPostgresConnection =
-            configuration["MCP_POSTGRES_CONNECTION"]
-            ?? configuration["POSTGRES_CONNECTION_STRING"];
-        var configuredProvider = options.Provider;
-
-        Provider = ResolveProvider(configuredProvider, envPostgresConnection);
-        _postgresConnectionString =
-            options.Postgres.ConnectionString
-            ?? configuration.GetConnectionString("Postgres")
-            ?? envPostgresConnection
-            ?? string.Empty;
-
         var workspaceRoot = ResolveWorkspaceRoot(configuration);
         _sqliteDatabasePath = ResolveSqlitePath(
             options.Sqlite.DatabasePath,
             workspaceRoot);
 
-        if (Provider == "postgres" && string.IsNullOrWhiteSpace(_postgresConnectionString))
-        {
-            _logger.LogWarning("Database provider is set to postgres but no connection string was found.");
-        }
-
-        _logger.LogInformation("Database provider selected: {Provider}", Provider);
+        _logger.LogInformation("Using SQLite database: {DatabasePath}", _sqliteDatabasePath);
     }
 
-    public string Provider { get; }
+    public string Provider => "sqlite";
 
-    public bool IsConfigured =>
-        string.Equals(Provider, "sqlite", StringComparison.OrdinalIgnoreCase)
-        || !string.IsNullOrWhiteSpace(_postgresConnectionString);
+    public bool IsConfigured => true;
 
     public async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken = default)
     {
-        if (string.Equals(Provider, "postgres", StringComparison.OrdinalIgnoreCase))
-        {
-            if (string.IsNullOrWhiteSpace(_postgresConnectionString))
-            {
-                throw new InvalidOperationException("Postgres provider selected, but no connection string is configured.");
-            }
-
-            var postgresConnection = new NpgsqlConnection(_postgresConnectionString);
-            await postgresConnection.OpenAsync(cancellationToken);
-            return postgresConnection;
-        }
-
         await EnsureSqliteInitializedAsync(cancellationToken);
 
         var sqliteConnection = new SqliteConnection(CreateSqliteConnectionString());
@@ -159,27 +126,6 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
             Cache = SqliteCacheMode.Shared
         };
         return builder.ToString();
-    }
-
-    private static string ResolveProvider(string? configuredProvider, string? envPostgresConnection)
-    {
-        if (!string.IsNullOrWhiteSpace(envPostgresConnection))
-        {
-            // Preserve backward compatibility: legacy env var always selects Postgres.
-            return "postgres";
-        }
-
-        if (!string.IsNullOrWhiteSpace(configuredProvider))
-        {
-            return configuredProvider.Trim().ToLowerInvariant() switch
-            {
-                "sqlite" => "sqlite",
-                "postgres" or "postgresql" => "postgres",
-                _ => "sqlite"
-            };
-        }
-
-        return "sqlite";
     }
 
     private static string ResolveWorkspaceRoot(IConfiguration configuration)
