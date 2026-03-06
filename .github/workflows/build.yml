@@ -1,0 +1,176 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '10.0.x'
+
+jobs:
+  build:
+    name: Build ${{ matrix.runtime }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - runtime: linux-x64
+            os: ubuntu-latest
+            artifact: mcp-sidecar-linux-x64
+          - runtime: linux-arm64
+            os: ubuntu-latest
+            artifact: mcp-sidecar-linux-arm64
+          # macOS
+          - runtime: osx-x64
+            os: macos-latest
+            artifact: mcp-sidecar-osx-x64
+          - runtime: osx-arm64
+            os: macos-latest
+            artifact: mcp-sidecar-osx-arm64
+          # Windows
+          - runtime: win-x64
+            os: windows-latest
+            artifact: mcp-sidecar-win-x64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for versioning
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    - name: Restore dependencies
+      run: dotnet restore
+      working-directory: src/McpSidecar
+
+    - name: Build
+      run: dotnet build --configuration Release --no-restore
+      working-directory: src/McpSidecar
+
+    - name: Test
+      run: dotnet test --configuration Release --no-build --verbosity normal
+      working-directory: src/McpSidecar
+      continue-on-error: true  # No tests yet
+
+    - name: Publish
+      run: |
+        dotnet publish \
+          --configuration Release \
+          --runtime ${{ matrix.runtime }} \
+          --self-contained true \
+          -p:PublishSingleFile=true \
+          -p:PublishTrimmed=true \
+          -p:VersionPrefix=${{ github.ref_name }} \
+          -p:SourceRevisionId=${{ github.sha }} \
+          -p:BuildDate=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+          --output ./publish
+      working-directory: src/McpSidecar
+      shell: bash
+
+    - name: Create archive (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        cd src/McpSidecar/publish
+        tar -czvf ../../../${{ matrix.artifact }}.tar.gz *
+    
+    - name: Create archive (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        cd src/McpSidecar/publish
+        Compress-Archive -Path * -DestinationPath ../../../${{ matrix.artifact }}.zip
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact }}
+        path: |
+          ${{ matrix.artifact }}.tar.gz
+          ${{ matrix.artifact }}.zip
+        retention-days: 30
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        name: Release ${{ github.ref_name }}
+        body: |
+          ## mcp-sidecar ${{ github.ref_name }}
+          
+          Cross-platform builds for mcp-sidecar.
+          
+          ### Downloads
+          - **Linux x64**: `mcp-sidecar-linux-x64.tar.gz`
+          - **Linux ARM64**: `mcp-sidecar-linux-arm64.tar.gz`
+          - **macOS x64**: `mcp-sidecar-osx-x64.tar.gz`
+          - **macOS ARM64**: `mcp-sidecar-osx-arm64.tar.gz`
+          - **Windows x64**: `mcp-sidecar-win-x64.zip`
+          
+          ### Usage
+          ```bash
+          # Linux/macOS
+          tar -xzf mcp-sidecar-<platform>.tar.gz
+          ./mcp-sidecar --help
+          
+          # Windows
+          # Extract zip file
+          mcp-sidecar.exe --help
+          ```
+          
+          ### Requirements
+          - clangd >= 14 (must be installed separately)
+          
+          ### Changes
+          See commit history for details.
+        files: |
+          artifacts/mcp-sidecar-linux-x64/mcp-sidecar-linux-x64.tar.gz
+          artifacts/mcp-sidecar-linux-arm64/mcp-sidecar-linux-arm64.tar.gz
+          artifacts/mcp-sidecar-osx-x64/mcp-sidecar-osx-x64.tar.gz
+          artifacts/mcp-sidecar-osx-arm64/mcp-sidecar-osx-arm64.tar.gz
+          artifacts/mcp-sidecar-win-x64/mcp-sidecar-win-x64.zip
+        draft: false
+        prerelease: ${{ contains(github.ref_name, '-') }}  # Prerelease if tag contains '-'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Optional: Nightly builds
+  nightly:
+    name: Nightly Build
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Upload nightly artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: nightly-${{ github.sha }}
+        path: artifacts
+        retention-days: 7

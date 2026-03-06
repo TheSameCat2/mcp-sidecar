@@ -10,6 +10,7 @@ var isForce = args.Contains("--force");
 var isValidateOnly = args.Contains("--validate-compile-commands") || args.Contains("--validate");
 var showFailures = args.Contains("--show-failures");
 var showHelp = args.Contains("--help") || args.Contains("-h");
+var showVersion = args.Contains("--version") || args.Contains("-v");
 
 // Parse explicit paths
 var explicitWorkspace = args.SkipWhile(a => a != "--workspace" && a != "-w")
@@ -18,6 +19,20 @@ var explicitWorkspace = args.SkipWhile(a => a != "--workspace" && a != "-w")
 var explicitCompileCommands = args.SkipWhile(a => a != "--compile-commands" && a != "-c")
                                    .Skip(1)
                                    .FirstOrDefault();
+
+// Version output
+if (showVersion)
+{
+    var assembly = typeof(Program).Assembly;
+    var version = assembly.GetName().Version?.ToString(3) ?? "unknown";
+    var infoAttr = assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+        .Cast<System.Reflection.AssemblyInformationalVersionAttribute>()
+        .FirstOrDefault();
+    var infoVersion = infoAttr?.InformationalVersion ?? version;
+    
+    Console.WriteLine($"mcp-sidecar {infoVersion}");
+    return;
+}
 
 // Help output
 if (showHelp)
@@ -34,6 +49,7 @@ if (showHelp)
     Console.WriteLine("  --validate-compile-commands Validate compile_commands.json and show report");
     Console.WriteLine("  --workspace, -w <path>      Explicit workspace root directory");
     Console.WriteLine("  --compile-commands, -c <path>  Explicit compile_commands.json path");
+    Console.WriteLine("  --version, -v               Show version information");
     Console.WriteLine("  --help, -h                  Show this help message");
     Console.WriteLine();
     Console.WriteLine("Environment variables:");
