@@ -8,6 +8,7 @@ using McpSidecar.Services;
 var isExtractOnly = args.Contains("--extract") || args.Contains("-e");
 var isForce = args.Contains("--force");
 var isValidateOnly = args.Contains("--validate-compile-commands") || args.Contains("--validate");
+var showFailures = args.Contains("--show-failures");
 var showHelp = args.Contains("--help") || args.Contains("-h");
 
 // Parse explicit paths
@@ -29,6 +30,7 @@ if (showHelp)
     Console.WriteLine("Options:");
     Console.WriteLine("  --extract, -e               Run extraction and exit (standalone mode)");
     Console.WriteLine("  --force                     Force full re-extraction (ignore file hashes)");
+    Console.WriteLine("  --show-failures             Show detailed list of extraction failures");
     Console.WriteLine("  --validate-compile-commands Validate compile_commands.json and show report");
     Console.WriteLine("  --workspace, -w <path>      Explicit workspace root directory");
     Console.WriteLine("  --compile-commands, -c <path>  Explicit compile_commands.json path");
@@ -166,7 +168,7 @@ if (isValidateOnly)
 // --extract mode: run extraction standalone with progress, then exit
 if (isExtractOnly)
 {
-    await RunExtractionAsync(workspaceRoot, compileCommandsPath, isForce);
+    await RunExtractionAsync(workspaceRoot, compileCommandsPath, isForce, showFailures);
     return;
 }
 
@@ -196,7 +198,7 @@ var host = builder.Build();
 await host.RunAsync();
 
 // Standalone extraction with progress display
-static async Task RunExtractionAsync(string workspaceRoot, string? compileCommandsPath, bool isForce)
+static async Task RunExtractionAsync(string workspaceRoot, string? compileCommandsPath, bool isForce, bool showFailures)
 {
     Console.OutputEncoding = System.Text.Encoding.UTF8;
     
@@ -241,13 +243,17 @@ static async Task RunExtractionAsync(string workspaceRoot, string? compileComman
     var filesProcessed = 0;
     var symbolsExtracted = 0;
     var totalFiles = 0;
+    var filesFailed = 0;
+    Dictionary<string, string>? failedFiles = null;
     
     // Progress bar update
-    void UpdateProgress(int files, int symbols, int total, string? phase = null)
+    void UpdateProgress(int files, int symbols, int total, string? phase = null, int failed = 0, Dictionary<string, string>? failures = null)
     {
         filesProcessed = files;
         symbolsExtracted = symbols;
         if (total > 0) totalFiles = total;
+        filesFailed = failed;
+        if (failures != null) failedFiles = failures;
         
         var elapsed = DateTime.Now - startTime;
         var elapsedStr = elapsed.ToString(@"mm\:ss");
@@ -282,7 +288,7 @@ static async Task RunExtractionAsync(string workspaceRoot, string? compileComman
             cts.Token,
             progress: new Progress<ExtractionProgress>(p =>
             {
-                UpdateProgress(p.FilesProcessed, p.SymbolsExtracted, p.TotalFiles, p.CurrentPhase);
+                UpdateProgress(p.FilesProcessed, p.SymbolsExtracted, p.TotalFiles, p.CurrentPhase, p.FilesFailed, p.FailedFiles);
             }));
         
         var finalElapsed = DateTime.Now - startTime;
@@ -291,6 +297,34 @@ static async Task RunExtractionAsync(string workspaceRoot, string? compileComman
         Console.WriteLine($"  Symbols: {symbolsExtracted:N0}");
         Console.WriteLine($"  Files: {filesProcessed:N0}");
         Console.WriteLine($"  Time: {finalElapsed.ToString(@"mm\:ss")}");
+        
+        // Show failure summary if any
+        if (filesFailed > 0 && failedFiles != null)
+        {
+            Console.WriteLine($"  Failures: {filesFailed}");
+            
+            if (showFailures)
+            {
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("Failed files:");
+                foreach (var (file, reason) in failedFiles.Take(20))
+                {
+                    Console.WriteLine($"  - {file}");
+                    Console.WriteLine($"    {reason}");
+                }
+                
+                if (failedFiles.Count > 20)
+                {
+                    Console.WriteLine($"  ... and {failedFiles.Count - 20} more");
+                }
+                Console.ResetColor();
+            }
+            else
+            {
+                Console.WriteLine($"  Run with --show-failures to see details");
+            }
+        }
     }
     catch (OperationCanceledException)
     {
@@ -328,4 +362,6 @@ public class ExtractionProgress
     public int TotalFiles { get; set; }
     public int SymbolsExtracted { get; set; }
     public string? CurrentPhase { get; set; }
+    public int FilesFailed { get; set; }
+    public Dictionary<string, string>? FailedFiles { get; set; }
 }

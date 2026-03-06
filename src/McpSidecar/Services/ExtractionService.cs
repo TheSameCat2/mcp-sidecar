@@ -254,7 +254,7 @@ public class ExtractionService
             // Update progress after seeding
             await UpdateExtractionProgressAsync(
                 connection, snapshotId, "running", totalFiles,
-                state.SourceFiles.Count, 0, 
+                state.SourceFiles.Count, state.FailedFiles.Count, 
                 state.SourceFiles.Count > 0 ? state.SourceFiles.Last() : null, 
                 null, cancellationToken);
             
@@ -303,17 +303,26 @@ public class ExtractionService
             await ExtractFileDependenciesAsync(connection, state, cancellationToken);
 
             _logger.LogInformation(
-                "Extraction complete for snapshot {SnapshotId}: files={FileCount}, symbols={SymbolCount}, seeds={SeedCount}",
+                "Extraction complete for snapshot {SnapshotId}: files={FileCount}, symbols={SymbolCount}, seeds={SeedCount}, failures={FailureCount}",
                 state.SnapshotId,
                 state.FileIdsByPath.Count,
                 state.SymbolIdsByStableKey.Count,
-                state.SymbolSeeds.Count);
+                state.SymbolSeeds.Count,
+                state.FailedFiles.Count);
+
+            // Log failure summary if any
+            if (state.FailedFiles.Count > 0)
+            {
+                _logger.LogWarning(GenerateFailureSummary(state));
+            }
 
             progress?.Report(new ExtractionProgress 
             { 
                 TotalFiles = totalFiles, 
                 FilesProcessed = state.SourceFiles.Count, 
                 SymbolsExtracted = state.SymbolIdsByStableKey.Count,
+                FilesFailed = state.FailedFiles.Count,
+                FailedFiles = state.FailedFiles,
                 CurrentPhase = "Complete" 
             });
             
@@ -474,22 +483,24 @@ public class ExtractionService
                 continue;
             }
             
-            var fileUri = PathToFileUri(sourcePath);
-            var fileId = await EnsureFileAsync(connection, state, sourcePath, cancellationToken);
-            var parseContextId = await EnsureParseContextForFileAsync(connection, state, sourcePath, fileId, cancellationToken);
-
-            await EnsureFileOpenAsync(state, sourcePath, cancellationToken);
-
-            var documentSymbolResponse = await _clangd.SendRequestAsync(
-                "textDocument/documentSymbol",
-                new { textDocument = new { uri = fileUri } },
-                cancellationToken);
-
-            if (documentSymbolResponse.HasValue &&
-                documentSymbolResponse.Value.TryGetProperty("result", out var docSymbols) &&
-                docSymbols.ValueKind == JsonValueKind.Array)
+            try
             {
-                foreach (var symbolElement in docSymbols.EnumerateArray())
+                var fileUri = PathToFileUri(sourcePath);
+                var fileId = await EnsureFileAsync(connection, state, sourcePath, cancellationToken);
+                var parseContextId = await EnsureParseContextForFileAsync(connection, state, sourcePath, fileId, cancellationToken);
+
+                await EnsureFileOpenAsync(state, sourcePath, cancellationToken);
+
+                var documentSymbolResponse = await _clangd.SendRequestAsync(
+                    "textDocument/documentSymbol",
+                    new { textDocument = new { uri = fileUri } },
+                    cancellationToken);
+
+                if (documentSymbolResponse.HasValue &&
+                    documentSymbolResponse.Value.TryGetProperty("result", out var docSymbols) &&
+                    docSymbols.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var symbolElement in docSymbols.EnumerateArray())
                 {
                     await ProcessDocumentSymbolElementAsync(
                         connection,
@@ -507,6 +518,11 @@ public class ExtractionService
             
             // Mark this file as having symbols extracted
             state.FilesSymbolsExtracted.Add(sourcePath);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                RecordFileFailure(state, sourcePath, ex.Message);
+            }
         }
 
         var workspaceSymbolResponse = await _clangd.SendRequestAsync(
@@ -1619,6 +1635,78 @@ public class ExtractionService
         return null;
     }
 
+    /// <summary>
+    /// Records a file extraction failure with reason.
+    /// </summary>
+    private void RecordFileFailure(ExtractionState state, string filePath, string reason)
+    {
+        state.FailedFiles[filePath] = reason;
+        
+        // Categorize failure
+        var category = CategorizeFailure(reason);
+        if (!state.FailureCategories.ContainsKey(category))
+        {
+            state.FailureCategories[category] = 0;
+        }
+        state.FailureCategories[category]++;
+        
+        _logger.LogDebug("File extraction failed: {FilePath} - {Reason}", filePath, reason);
+    }
+
+    /// <summary>
+    /// Categorizes a failure reason into a broad category.
+    /// </summary>
+    private static string CategorizeFailure(string reason)
+    {
+        if (reason.Contains("syntax", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("parse error", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Syntax errors";
+        }
+        
+        if (reason.Contains("include", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("header", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Missing includes";
+        }
+        
+        if (reason.Contains("timeout", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Timeouts";
+        }
+        
+        if (reason.Contains("clangd", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Clangd errors";
+        }
+        
+        return "Other";
+    }
+
+    /// <summary>
+    /// Generates a failure summary report.
+    /// </summary>
+    private string GenerateFailureSummary(ExtractionState state)
+    {
+        if (state.FailedFiles.Count == 0)
+        {
+            return "No failures";
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Extraction completed with {state.FailedFiles.Count} file(s) failed:");
+        sb.AppendLine();
+        
+        // Group by category
+        foreach (var category in state.FailureCategories.OrderByDescending(x => x.Value))
+        {
+            sb.AppendLine($"  {category.Key}: {category.Value} files");
+        }
+        
+        return sb.ToString();
+    }
+
     private async Task<long> InsertSnapshotAsync(
         DbConnection connection,
         Snapshot snapshot,
@@ -2505,5 +2593,9 @@ public class ExtractionService
         public HashSet<string> CallsiteDedupKeys { get; } = new(StringComparer.Ordinal);
         public HashSet<string> FilesSymbolsExtracted { get; } = new(StringComparer.Ordinal);
         public List<string> SourceFiles { get; } = new();
+        
+        // Failure tracking
+        public Dictionary<string, string> FailedFiles { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, int> FailureCategories { get; } = new(StringComparer.Ordinal);
     }
 }
