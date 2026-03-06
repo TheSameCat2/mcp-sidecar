@@ -2483,7 +2483,21 @@ public class ExtractionService
 
     private static string PathToFileUri(string path)
     {
-        return new Uri(path).AbsoluteUri;
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            throw new ArgumentException("Path cannot be null or empty", nameof(path));
+        }
+
+        var absolutePath = Path.IsPathRooted(path) ? path : Path.GetFullPath(path);
+        absolutePath = absolutePath.Replace('\\', '/');
+        
+        var builder = new UriBuilder
+        {
+            Scheme = "file",
+            Path = absolutePath
+        };
+        
+        return builder.Uri.AbsoluteUri;
     }
 
     private static bool UriLooksLikeFile(string value)
