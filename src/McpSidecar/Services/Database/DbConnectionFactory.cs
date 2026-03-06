@@ -149,7 +149,7 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
     /// </summary>
     private async Task ApplyMigrationsAsync(SqliteConnection connection, int currentVersion, CancellationToken cancellationToken)
     {
-        if (currentVersion >= 2)
+        if (currentVersion >= 3)
         {
             // Already up to date
             return;
@@ -182,6 +182,38 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
             
             await command.ExecuteNonQueryAsync(cancellationToken);
             _logger.LogInformation("Migration to version 2 complete");
+        }
+
+        // Migration 3: Add symbol_identity table
+        if (currentVersion < 3)
+        {
+            _logger.LogInformation("Applying migration: version 3 (symbol_identity table)");
+            
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE IF NOT EXISTS symbol_identity (
+                    identity_hash TEXT PRIMARY KEY,
+                    stable_key TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    qualified_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    signature_hash TEXT,
+                    first_seen_snapshot_id INTEGER NOT NULL REFERENCES snapshot(snapshot_id) ON DELETE CASCADE,
+                    last_seen_snapshot_id INTEGER NOT NULL REFERENCES snapshot(snapshot_id) ON DELETE CASCADE,
+                    appearance_count INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                
+                CREATE INDEX IF NOT EXISTS ix_symbol_identity_file ON symbol_identity(file_path);
+                CREATE INDEX IF NOT EXISTS ix_symbol_identity_qualified_name ON symbol_identity(qualified_name);
+                CREATE INDEX IF NOT EXISTS ix_symbol_identity_stable_key ON symbol_identity(stable_key);
+                
+                INSERT INTO schema_version (version, description) VALUES (3, 'Added symbol_identity table for stable symbol tracking');
+                """;
+            
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            _logger.LogInformation("Migration to version 3 complete");
         }
     }
 

@@ -945,6 +945,11 @@ public class ExtractionService
         state.SymbolIdsByStableKey[stableKey] = symbolId;
         state.SymbolIdsByQualifiedName[qualifiedName] = symbolId;
 
+        // Track symbol identity for cross-snapshot consistency
+        await UpdateSymbolIdentityAsync(
+            connection, state.SnapshotId, stableKey, filePath, 
+            qualifiedName, kind, null, cancellationToken);
+
         var decl = new SymbolDecl
         {
             SnapshotId = state.SnapshotId,
@@ -1100,6 +1105,11 @@ public class ExtractionService
         var symbolId = await UpsertSymbolAsync(connection, symbol, cancellationToken);
         state.SymbolIdsByStableKey[stableKey] = symbolId;
         state.SymbolIdsByQualifiedName[qualifiedName] = symbolId;
+
+        // Track symbol identity for cross-snapshot consistency
+        await UpdateSymbolIdentityAsync(
+            connection, state.SnapshotId, stableKey, filePath!, 
+            qualifiedName, kind, null, cancellationToken);
 
         var decl = new SymbolDecl
         {
@@ -2498,9 +2508,115 @@ public class ExtractionService
             : BuildExternalIncludePath(uriOrPath);
     }
 
+    /// <summary>
+    /// Builds a stable key for a symbol that persists across re-indexes.
+    /// Uses file path + qualified name + kind, not line numbers.
+    /// </summary>
     private static string BuildStableKey(string qualifiedName, string kind, string filePath, FactSpan span)
     {
-        return $"{qualifiedName}|{kind}|{NormalizePath(filePath)}|{span.StartLine}:{span.StartCharacter}";
+        // Use file + qualified name + kind for stability across line number changes
+        // Still include start line for disambiguation of multiple declarations in same file
+        return $"{NormalizePath(filePath)}|{qualifiedName}|{kind}|{span.StartLine}";
+    }
+
+    /// <summary>
+    /// Builds an identity hash for a symbol that's completely independent of location.
+    /// Used for tracking symbols across file moves and refactorings.
+    /// </summary>
+    private static string BuildIdentityHash(string qualifiedName, string kind, string? signature)
+    {
+        var input = signature != null 
+            ? $"{qualifiedName}|{kind}|{signature}"
+            : $"{qualifiedName}|{kind}";
+        
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(input));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Updates symbol identity tracking for cross-snapshot consistency.
+    /// </summary>
+    private async Task UpdateSymbolIdentityAsync(
+        DbConnection connection,
+        long snapshotId,
+        string stableKey,
+        string filePath,
+        string qualifiedName,
+        string kind,
+        string? signature,
+        CancellationToken cancellationToken)
+    {
+        var identityHash = BuildIdentityHash(qualifiedName, kind, signature);
+        
+        const string sql = """
+            INSERT INTO symbol_identity (
+                identity_hash, stable_key, file_path, qualified_name, kind, signature_hash,
+                first_seen_snapshot_id, last_seen_snapshot_id, appearance_count
+            )
+            VALUES (
+                @identity_hash, @stable_key, @file_path, @qualified_name, @kind, @signature_hash,
+                @snapshot_id, @snapshot_id, 1
+            )
+            ON CONFLICT(identity_hash) DO UPDATE SET
+                stable_key = @stable_key,
+                file_path = @file_path,
+                last_seen_snapshot_id = @snapshot_id,
+                appearance_count = appearance_count + 1,
+                updated_at = CURRENT_TIMESTAMP;
+            """;
+
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
+        cmd.Parameters.AddWithValue("identity_hash", identityHash);
+        cmd.Parameters.AddWithValue("stable_key", stableKey);
+        cmd.Parameters.AddWithValue("file_path", filePath);
+        cmd.Parameters.AddWithValue("qualified_name", qualifiedName);
+        cmd.Parameters.AddWithValue("kind", kind);
+        cmd.Parameters.AddWithValue("signature_hash", (object?)signature ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("snapshot_id", snapshotId);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Detects symbols that changed identity between snapshots.
+    /// </summary>
+    private async Task<List<(string QualifiedName, string OldFile, string NewFile)>> DetectSymbolIdentityDriftAsync(
+        DbConnection connection,
+        long currentSnapshotId,
+        long? previousSnapshotId,
+        CancellationToken cancellationToken)
+    {
+        if (!previousSnapshotId.HasValue)
+        {
+            return new List<(string, string, string)>();
+        }
+
+        const string sql = """
+            SELECT 
+                curr.qualified_name,
+                prev.file_path AS old_file,
+                curr.file_path AS new_file
+            FROM symbol_identity curr
+            INNER JOIN symbol_identity prev ON curr.identity_hash = prev.identity_hash
+            WHERE curr.last_seen_snapshot_id = @current_snapshot_id
+              AND prev.last_seen_snapshot_id = @previous_snapshot_id
+              AND curr.file_path != prev.file_path;
+            """;
+
+        var results = new List<(string, string, string)>();
+        await using var cmd = connection.CreateDbCommand(_sqlBuilder, sql);
+        cmd.Parameters.AddWithValue("current_snapshot_id", currentSnapshotId);
+        cmd.Parameters.AddWithValue("previous_snapshot_id", previousSnapshotId.Value);
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var qualifiedName = reader.GetString(0);
+            var oldFile = reader.GetString(1);
+            var newFile = reader.GetString(2);
+            results.Add((qualifiedName, oldFile, newFile));
+        }
+
+        return results;
     }
 
     private static string InferDirectiveKind(string lineText)

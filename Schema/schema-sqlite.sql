@@ -10,6 +10,26 @@ CREATE TABLE IF NOT EXISTS schema_version (
 -- Initial schema version record
 INSERT INTO schema_version (version, description) VALUES (1, 'Initial schema');
 INSERT INTO schema_version (version, description) VALUES (2, 'Added extraction_progress table for resume capability');
+INSERT INTO schema_version (version, description) VALUES (3, 'Added symbol_identity table for stable symbol tracking');
+
+-- Symbol identity tracking for cross-snapshot stability
+CREATE TABLE IF NOT EXISTS symbol_identity (
+    identity_hash TEXT PRIMARY KEY,
+    stable_key TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    qualified_name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    signature_hash TEXT,
+    first_seen_snapshot_id INTEGER NOT NULL REFERENCES snapshot(snapshot_id) ON DELETE CASCADE,
+    last_seen_snapshot_id INTEGER NOT NULL REFERENCES snapshot(snapshot_id) ON DELETE CASCADE,
+    appearance_count INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS ix_symbol_identity_file ON symbol_identity(file_path);
+CREATE INDEX IF NOT EXISTS ix_symbol_identity_qualified_name ON symbol_identity(qualified_name);
+CREATE INDEX IF NOT EXISTS ix_symbol_identity_stable_key ON symbol_identity(stable_key);
 
 CREATE TABLE IF NOT EXISTS snapshot (
     snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
