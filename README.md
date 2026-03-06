@@ -102,3 +102,253 @@ Built with love by [Synthia](https://twitter.com/TheSameCat2) 💜
 ---
 
 ⭐ **Star on GitHub** | 🐙 **Issues welcome** | 💬 **Feedback appreciated**
+
+
+---
+
+# 🛣️ Development Roadmap
+
+The goal of **mcp-sidecar** is not just symbol search, but a **build-aware fact engine that AI coding agents can trust when working in large C++ codebases**.
+
+Below is the working roadmap. Items are intentionally checkable so automated agents (like OpenClaw / Synthia) can execute against them.
+
+---
+
+## Phase 1 — Core Stability
+
+### Single Binary Deployment
+- [ ] Complete SQLite migration
+- [ ] Remove Postgres dependency entirely
+- [ ] Ensure DB auto‑creation on first run
+- [ ] Package as single binary build
+- [ ] Validate Linux / macOS portability
+
+### Indexing Reliability
+- [ ] Robust incremental indexing
+- [ ] Resume interrupted indexing jobs
+- [ ] Detect stale compile_commands entries
+- [ ] Detect parse failures and report clearly
+- [ ] Validate symbol identity across re‑index runs
+
+### Workspace Detection
+- [ ] Auto‑detect project root
+- [ ] Auto‑detect compile_commands.json
+- [ ] Support override flags
+- [ ] Support multi‑workspace indexing
+
+---
+
+## Phase 2 — Trust & Provenance
+
+Goal: Every fact returned should explain **why it is trustworthy**.
+
+- [ ] Attach provenance metadata to results
+- [ ] Mark origin: clangd / AST / graph / heuristic
+- [ ] Return exact file:line:column locations
+- [ ] Introduce confidence levels:
+  - exact
+  - high‑confidence
+  - inferred
+  - speculative
+
+### Build Context Awareness
+
+- [ ] Track compile flags per file
+- [ ] Track macro environments
+- [ ] Track platform/build variants
+- [ ] Detect symbols hidden behind defines
+
+### Parse Context Reporting
+
+- [ ] Track files failing AST generation
+- [ ] Report incomplete analysis conditions
+
+---
+
+## Phase 3 — Build Reality Modeling
+
+Goal: reflect **the actual compilation environment**.
+
+- [ ] Persist compile_commands in DB
+- [ ] Model file → compile flag mapping
+- [ ] Track include search paths
+
+### Tools
+
+- [ ] `cpp.build_explain`
+- [ ] `cpp.include_explain`
+- [ ] `cpp.macro_explain`
+
+Example:
+
+Symbol active because:
+- BUILD_TARGET=Linux
+- FEATURE_X enabled
+- included via foo.hpp → bar.hpp
+
+---
+
+## Phase 4 — Change Impact Engine
+
+Goal: allow agents to **safely modify code**.
+
+- [ ] Build symbol dependency graph
+- [ ] Track callers / callees
+- [ ] Track type dependencies
+- [ ] Track inheritance relationships
+
+### Query
+
+- [ ] `change.impact(symbol)`
+
+Returns:
+
+- directly affected symbols
+- downstream call chains
+- impacted files
+- impacted modules
+
+### Risk Ranking
+
+- [ ] Rank breakage probability
+- [ ] Highlight API boundaries
+- [ ] Highlight template propagation
+
+---
+
+## Phase 5 — Flow & Effect Analysis (Key Differentiator)
+
+Goal: understand **how data and effects propagate through the system**.
+
+### Call Path Discovery
+
+- [ ] Identify shortest call paths
+- [ ] Identify high‑frequency call paths
+- [ ] Detect likely entry points
+
+### Flow Summaries
+
+- [ ] `flow_summary(symbol)`
+
+Example:
+
+ButtonClick → UIHandler::StartScan → ScanController::Run → MotionPlanner::Execute
+
+### Effect Summaries
+
+- [ ] `effect_summary(symbol)`
+
+Classify effects:
+
+- IO
+- hardware interaction
+- memory mutation
+- state transitions
+
+---
+
+## Phase 6 — Agent‑Optimized Output
+
+Goal: return **minimal safe context for coding agents**.
+
+### Context Packing
+
+- [ ] `cpp.context_pack(symbol)`
+
+Include:
+
+- symbol definition
+- key callers
+- related types
+- compile environment
+- change risk factors
+
+### Ranking
+
+- [ ] Rank references by importance
+- [ ] Rank files by change risk
+- [ ] Rank call paths by likelihood
+
+### Token Budget Awareness
+
+- [ ] Configurable token limits
+- [ ] Prefer highest‑value nodes
+
+---
+
+## Phase 7 — Performance & Scalability
+
+Goal: support **large industrial C++ codebases**.
+
+- [ ] Validate 100k+ symbol projects
+- [ ] Validate 10k+ file repositories
+- [ ] Track memory usage
+
+### Index Performance
+
+- [ ] Parallel indexing
+- [ ] Lazy extraction
+- [ ] Query caching
+
+### DB Optimization
+
+- [ ] SQLite query tuning
+- [ ] Precomputed graph tables
+
+---
+
+## Phase 8 — Benchmarks & Validation
+
+Goal: prove **agents perform better using mcp‑sidecar**.
+
+### Developer Tasks
+
+Benchmark:
+
+- [ ] Trace behavior from UI event
+- [ ] Trace hardware interaction path
+- [ ] Safely rename a function
+- [ ] Remove unused include
+- [ ] Identify API boundaries
+
+Measure:
+
+- steps required
+- tokens consumed
+- correctness
+
+### Agent Comparison
+
+Compare:
+
+Agent + grep  
+Agent + embeddings  
+Agent + mcp‑sidecar
+
+---
+
+## Phase 9 — Documentation & Examples
+
+- [ ] Example refactor workflow
+- [ ] Example debugging workflow
+- [ ] Example API exploration
+
+### Tutorials
+
+- [ ] Setup guide
+- [ ] MCP integration guide
+- [ ] Tool usage examples
+
+---
+
+## Long‑Term Vision
+
+**mcp‑sidecar becomes a build‑aware fact engine for codebases that AI agents can trust.**
+
+Not just:
+
+symbol search
+
+But:
+
+a system that explains how the software actually works.
