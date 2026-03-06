@@ -30,19 +30,27 @@ public class ClangdService : IDisposable
         _logger = logger;
     }
 
-    public async Task StartAsync(string? workspaceRoot = null, CancellationToken cancellationToken = default)
+    public async Task StartAsync(string? workspaceRoot = null, string? compileCommandsPath = null, CancellationToken cancellationToken = default)
     {
         _workspaceRoot = workspaceRoot ?? Directory.GetCurrentDirectory();
         
-        // Find compile_commands.json
-        _compileCommandsPath = FindCompileCommands(_workspaceRoot);
-        if (_compileCommandsPath != null)
+        // Use provided compile_commands.json path or auto-detect
+        if (!string.IsNullOrWhiteSpace(compileCommandsPath))
         {
-            _logger.LogInformation("Found compile_commands.json at: {Path}", _compileCommandsPath);
+            _compileCommandsPath = compileCommandsPath;
+            _logger.LogInformation("Using explicit compile_commands.json: {Path}", _compileCommandsPath);
         }
         else
         {
-            _logger.LogWarning("No compile_commands.json found in {Root}, clangd may have limited functionality", _workspaceRoot);
+            _compileCommandsPath = FindCompileCommands(_workspaceRoot);
+            if (_compileCommandsPath != null)
+            {
+                _logger.LogInformation("Auto-detected compile_commands.json: {Path}", _compileCommandsPath);
+            }
+            else
+            {
+                _logger.LogWarning("No compile_commands.json found in {Root}, clangd may have limited functionality", _workspaceRoot);
+            }
         }
 
         // Build clangd arguments

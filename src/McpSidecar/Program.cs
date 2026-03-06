@@ -7,19 +7,67 @@ using McpSidecar.Services;
 // Parse CLI args
 var isExtractOnly = args.Contains("--extract") || args.Contains("-e");
 var isForce = args.Contains("--force");
-var workspaceRoot = args.SkipWhile(a => a != "--workspace" && a != "-w")
-                        .Skip(1)
-                        .FirstOrDefault()
-                   ?? Environment.GetEnvironmentVariable("MCP_WORKSPACE_ROOT")
-                   ?? Directory.GetCurrentDirectory();
+var showHelp = args.Contains("--help") || args.Contains("-h");
 
-// Normalize to absolute path
-workspaceRoot = Path.GetFullPath(workspaceRoot);
+// Parse explicit paths
+var explicitWorkspace = args.SkipWhile(a => a != "--workspace" && a != "-w")
+                            .Skip(1)
+                            .FirstOrDefault();
+var explicitCompileCommands = args.SkipWhile(a => a != "--compile-commands" && a != "-c")
+                                   .Skip(1)
+                                   .FirstOrDefault();
+
+// Help output
+if (showHelp)
+{
+    Console.WriteLine("mcp-sidecar - Build-aware code fact extraction");
+    Console.WriteLine();
+    Console.WriteLine("Usage:");
+    Console.WriteLine("  mcp-sidecar [options]");
+    Console.WriteLine();
+    Console.WriteLine("Options:");
+    Console.WriteLine("  --extract, -e               Run extraction and exit (standalone mode)");
+    Console.WriteLine("  --force                     Force full re-extraction (ignore file hashes)");
+    Console.WriteLine("  --workspace, -w <path>      Explicit workspace root directory");
+    Console.WriteLine("  --compile-commands, -c <path>  Explicit compile_commands.json path");
+    Console.WriteLine("  --help, -h                  Show this help message");
+    Console.WriteLine();
+    Console.WriteLine("Environment variables:");
+    Console.WriteLine("  MCP_WORKSPACE_ROOT          Workspace root directory (fallback)");
+    Console.WriteLine("  MCP_COMPILE_COMMANDS        Path to compile_commands.json (fallback)");
+    Console.WriteLine();
+    Console.WriteLine("Auto-detection:");
+    Console.WriteLine("  Workspace root: Walks up from current directory looking for .git, CMakeLists.txt, etc.");
+    Console.WriteLine("  compile_commands.json: Searches workspace root, build/, cmake-build-*/, out/build/");
+    Console.WriteLine();
+    return;
+}
+
+// Create logger for workspace detection
+var loggerFactory = LoggerFactory.Create(builder => 
+{
+    builder.AddConsole(options => options.LogToStandardErrorThreshold = LogLevel.Warning);
+    builder.SetMinimumLevel(LogLevel.Information);
+});
+var detectionLogger = loggerFactory.CreateLogger<WorkspaceDetectionService>();
+
+// Detect workspace and compile_commands.json
+var workspaceService = new WorkspaceDetectionService(detectionLogger);
+var workspaceRoot = workspaceService.DetectWorkspaceRoot(explicitWorkspace);
+var compileCommandsPath = workspaceService.DetectCompileCommands(workspaceRoot, explicitCompileCommands);
+
+// Show detected paths in extract mode
+if (isExtractOnly)
+{
+    Console.WriteLine($"Workspace: {workspaceRoot}");
+    Console.WriteLine($"Compile commands: {compileCommandsPath ?? "Not found"}");
+    Console.WriteLine();
+}
 
 // --extract mode: run extraction standalone with progress, then exit
 if (isExtractOnly)
 {
-    await RunExtractionAsync(workspaceRoot, isForce);
+    await RunExtractionAsync(workspaceRoot, compileCommandsPath, isForce);
     return;
 }
 
@@ -33,8 +81,9 @@ builder.Logging.AddConsole(options =>
     options.LogToStandardErrorThreshold = LogLevel.Trace;
 });
 
-// Register workspace root as a singleton
+// Register workspace and compile_commands paths
 builder.Services.AddSingleton(new WorkspaceOptions { Root = workspaceRoot });
+builder.Services.AddSingleton(new CompileCommandsOptions { Path = compileCommandsPath });
 
 // Register services
 builder.Services.AddSingleton<IDbConnectionFactory, DbConnectionFactory>();
@@ -48,7 +97,7 @@ var host = builder.Build();
 await host.RunAsync();
 
 // Standalone extraction with progress display
-static async Task RunExtractionAsync(string workspaceRoot, bool isForce)
+static async Task RunExtractionAsync(string workspaceRoot, string? compileCommandsPath, bool isForce)
 {
     Console.OutputEncoding = System.Text.Encoding.UTF8;
     
@@ -62,6 +111,7 @@ static async Task RunExtractionAsync(string workspaceRoot, bool isForce)
     
     // Add configuration
     builder.Services.AddSingleton(new WorkspaceOptions { Root = workspaceRoot });
+    builder.Services.AddSingleton(new CompileCommandsOptions { Path = compileCommandsPath });
     
     // Register services (same as MCP mode)
     builder.Services.AddSingleton<IDbConnectionFactory, DbConnectionFactory>();
@@ -86,7 +136,6 @@ static async Task RunExtractionAsync(string workspaceRoot, bool isForce)
         Console.WriteLine("\nCancellation requested...");
     };
     
-    Console.WriteLine($"Extracting: {workspaceRoot}");
     Console.WriteLine();
     
     var startTime = DateTime.Now;
@@ -121,7 +170,7 @@ static async Task RunExtractionAsync(string workspaceRoot, bool isForce)
     {
         // Start clangd
         Console.Write("Starting clangd...");
-        await clangd.StartAsync(workspaceRoot, cts.Token);
+        await clangd.StartAsync(workspaceRoot, compileCommandsPath, cts.Token);
         Console.WriteLine(" ✓");
         
         // Get file count for progress (extraction service handles this)
@@ -165,6 +214,12 @@ static async Task RunExtractionAsync(string workspaceRoot, bool isForce)
 public class WorkspaceOptions
 {
     public string Root { get; set; } = string.Empty;
+}
+
+// Options for compile_commands.json path
+public class CompileCommandsOptions
+{
+    public string? Path { get; set; }
 }
 
 // Progress reporting structure

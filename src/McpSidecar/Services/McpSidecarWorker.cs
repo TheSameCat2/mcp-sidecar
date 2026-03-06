@@ -13,19 +13,22 @@ public class McpSidecarWorker : IHostedService
     private readonly ExtractionService _extractionService;
     private readonly McpServer _mcpServer;
     private readonly string _workspaceRoot;
+    private readonly string? _compileCommandsPath;
 
     public McpSidecarWorker(
         ILogger<McpSidecarWorker> logger,
         ClangdService clangd,
         ExtractionService extractionService,
         McpServer mcpServer,
-        WorkspaceOptions workspace)
+        WorkspaceOptions workspace,
+        CompileCommandsOptions compileCommands)
     {
         _logger = logger;
         _clangd = clangd;
         _extractionService = extractionService;
         _mcpServer = mcpServer;
         _workspaceRoot = workspace.Root;
+        _compileCommandsPath = compileCommands.Path;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -33,7 +36,7 @@ public class McpSidecarWorker : IHostedService
         _logger.LogInformation("MCP Sidecar starting...");
 
         // Start clangd subprocess
-        await _clangd.StartAsync(_workspaceRoot, cancellationToken);
+        await _clangd.StartAsync(_workspaceRoot, _compileCommandsPath, cancellationToken);
         _logger.LogInformation("Clangd started successfully for workspace: {Workspace}", _clangd.WorkspaceRoot);
 
         // Start MCP server FIRST (so it can respond to requests)
