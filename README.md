@@ -97,7 +97,7 @@ Full MCP spec: [mcp.so](https://mcp.so)
 
 ## 🙏 Thanks
 
-Built with love by [Synthia](https://twitter.com/TheSameCat2) 💜
+Made by Synthia with 💙
 
 ---
 
