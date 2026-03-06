@@ -17,6 +17,21 @@ CREATE TABLE IF NOT EXISTS snapshot (
 CREATE INDEX IF NOT EXISTS ix_snapshot_repo_root_current ON snapshot(repo_root, is_archived, created_at DESC, snapshot_id DESC);
 CREATE INDEX IF NOT EXISTS ix_snapshot_workspace_hash ON snapshot(workspace_hash);
 
+CREATE TABLE IF NOT EXISTS extraction_progress (
+    snapshot_id INTEGER PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'interrupted', 'failed')),
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    files_total INTEGER NOT NULL DEFAULT 0,
+    files_processed INTEGER NOT NULL DEFAULT 0,
+    files_failed INTEGER NOT NULL DEFAULT 0,
+    last_file_processed TEXT,
+    error_message TEXT,
+    FOREIGN KEY (snapshot_id) REFERENCES snapshot(snapshot_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS ix_extraction_progress_status ON extraction_progress(status);
+
 CREATE TABLE IF NOT EXISTS file (
     file_id INTEGER PRIMARY KEY AUTOINCREMENT,
     snapshot_id INTEGER NOT NULL REFERENCES snapshot(snapshot_id) ON DELETE CASCADE,
@@ -98,6 +113,24 @@ CREATE TABLE IF NOT EXISTS symbol (
 
 CREATE INDEX IF NOT EXISTS ix_symbol_snapshot_qualified_name ON symbol(snapshot_id, qualified_name);
 CREATE INDEX IF NOT EXISTS ix_symbol_snapshot_parent_symbol_id ON symbol(snapshot_id, parent_symbol_id);
+
+CREATE TABLE IF NOT EXISTS symbol_identity (
+    identity_hash TEXT PRIMARY KEY,
+    stable_key TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    qualified_name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    signature_hash TEXT,
+    first_seen_snapshot_id INTEGER NOT NULL REFERENCES snapshot(snapshot_id) ON DELETE CASCADE,
+    last_seen_snapshot_id INTEGER NOT NULL REFERENCES snapshot(snapshot_id) ON DELETE CASCADE,
+    appearance_count INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS ix_symbol_identity_file ON symbol_identity(file_path);
+CREATE INDEX IF NOT EXISTS ix_symbol_identity_qualified_name ON symbol_identity(qualified_name);
+CREATE INDEX IF NOT EXISTS ix_symbol_identity_stable_key ON symbol_identity(stable_key);
 
 CREATE TABLE IF NOT EXISTS symbol_decl (
     decl_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -391,3 +424,12 @@ LEFT JOIN ref_stats refs
 LEFT JOIN parse_stats parse
   ON parse.snapshot_id = f.snapshot_id
  AND parse.file_id = f.file_id;
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    description TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO schema_version (version, description)
+VALUES (3, 'Initial schema with extraction_progress and symbol_identity');

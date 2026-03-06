@@ -3,6 +3,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using McpSidecar.Services.Database;
 using McpSidecar.Services;
+using Microsoft.Extensions.Configuration;
 
 // Parse CLI args
 var isExtractOnly = args.Contains("--extract") || args.Contains("-e");
@@ -190,6 +191,10 @@ if (isExtractOnly)
 
 // Normal MCP server mode
 var builder = Host.CreateApplicationBuilder(args);
+builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+{
+    ["MCP_WORKSPACE_ROOT"] = workspaceRoot
+});
 
 // Configure logging - send to stderr only (stdout is for MCP protocol)
 builder.Logging.ClearProviders();
@@ -220,6 +225,10 @@ static async Task RunExtractionAsync(string workspaceRoot, string? compileComman
     
     // Build a minimal host with just the services we need
     var builder = Host.CreateApplicationBuilder();
+    builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        ["MCP_WORKSPACE_ROOT"] = workspaceRoot
+    });
     
     // Configure logging
     builder.Logging.ClearProviders();

@@ -95,14 +95,12 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
                 await command.ExecuteNonQueryAsync(cancellationToken);
                 _logger.LogInformation("Initialized SQLite schema: {DatabasePath}", _sqliteDatabasePath);
             }
-            else
-            {
-                var currentVersion = await GetSchemaVersionAsync(connection, cancellationToken);
-                _logger.LogDebug("SQLite schema version: {Version}", currentVersion);
-                
-                // Apply migrations if needed
-                await ApplyMigrationsAsync(connection, currentVersion, cancellationToken);
-            }
+
+            var currentVersion = await GetSchemaVersionAsync(connection, cancellationToken);
+            _logger.LogDebug("SQLite schema version: {Version}", currentVersion);
+
+            // Apply migrations for both fresh and existing databases.
+            await ApplyMigrationsAsync(connection, currentVersion, cancellationToken);
 
             _sqliteInitialized = true;
         }
@@ -129,12 +127,15 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
 
     private static async Task<int> GetSchemaVersionAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {
+        if (!await DoesTableExistAsync(connection, "schema_version", cancellationToken))
+        {
+            return 0;
+        }
+
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT version
+            SELECT COALESCE(MAX(version), 0)
             FROM schema_version
-            ORDER BY version DESC
-            LIMIT 1;
             """;
 
         var result = await command.ExecuteScalarAsync(cancellationToken);
@@ -151,6 +152,8 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
     /// </summary>
     private async Task ApplyMigrationsAsync(SqliteConnection connection, int currentVersion, CancellationToken cancellationToken)
     {
+        await EnsureSchemaVersionTableAsync(connection, cancellationToken);
+
         if (currentVersion >= 3)
         {
             // Already up to date
@@ -217,6 +220,38 @@ public sealed class DbConnectionFactory : IDbConnectionFactory
             await command.ExecuteNonQueryAsync(cancellationToken);
             _logger.LogInformation("Migration to version 3 complete");
         }
+    }
+
+    private static async Task EnsureSchemaVersionTableAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                description TEXT NOT NULL
+            );
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<bool> DoesTableExistAsync(
+        SqliteConnection connection,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = @table_name
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("@table_name", tableName);
+
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result != null && result != DBNull.Value;
     }
 
     private static async Task<string> LoadEmbeddedSchemaAsync(CancellationToken cancellationToken)
