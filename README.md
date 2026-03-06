@@ -82,14 +82,22 @@ Traditional C++ tools (ccls, clangd) are great for editors but terrible for AI. 
 - **Fast queries** - Pre-indexed for instant symbol search
 - **No setup** - Just point it at a folder with compile_commands.json
 
-## 🔧 Native Builds (Coming Soon)
+## 🔧 Native Builds
 
-```
-# Single binary, no dotnet required
-curl -L mcp-sidecar-linux-x64 -o mcp-sidecar
-chmod +x mcp-sidecar
+✅ **Available now in v0.1.0!**
+
+```bash
+# Download from GitHub Releases
+# Linux/macOS
+tar -xzf mcp-sidecar-linux-x64.tar.gz
 ./mcp-sidecar --extract --workspace ~/project
+
+# Windows
+# Extract mcp-sidecar-win-x64.zip
+mcp-sidecar.exe --extract --workspace C:\project
 ```
+
+Platforms: `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64`, `win-x64`
 
 ## 📚 MCP Protocol
 
@@ -114,27 +122,27 @@ Below is the working roadmap. Items are intentionally checkable so automated age
 
 ---
 
-## Phase 1 — Core Stability
+## Phase 1 — Core Stability ✅ COMPLETE (v0.1.0)
 
 ### Single Binary Deployment
-- [ ] Complete SQLite migration
-- [ ] Remove Postgres dependency entirely
-- [ ] Ensure DB auto‑creation on first run
-- [ ] Package as single binary build
-- [ ] Validate Linux / macOS portability
+- [x] Complete SQLite migration
+- [x] Remove Postgres dependency entirely
+- [x] Ensure DB auto‑creation on first run
+- [x] Package as single binary build
+- [x] Validate Linux / macOS / Windows portability
 
 ### Indexing Reliability
-- [ ] Robust incremental indexing
-- [ ] Resume interrupted indexing jobs
-- [ ] Detect stale compile_commands entries
-- [ ] Detect parse failures and report clearly
-- [ ] Validate symbol identity across re‑index runs
+- [x] Robust incremental indexing
+- [x] Resume interrupted indexing jobs
+- [x] Detect stale compile_commands entries
+- [x] Detect parse failures and report clearly
+- [ ] Validate symbol identity across re‑index runs (Phase 2)
 
 ### Workspace Detection
-- [ ] Auto‑detect project root
-- [ ] Auto‑detect compile_commands.json
-- [ ] Support override flags
-- [ ] Support multi‑workspace indexing
+- [x] Auto‑detect project root
+- [x] Auto‑detect compile_commands.json
+- [x] Support override flags
+- [ ] Support multi‑workspace indexing (Phase 2)
 
 ---
 
@@ -142,6 +150,11 @@ Below is the working roadmap. Items are intentionally checkable so automated age
 
 Goal: Every fact returned should explain **why it is trustworthy**.
 
+### Deferred from Phase 1
+- [ ] Validate symbol identity across re‑index runs
+- [ ] Support multi‑workspace indexing
+
+### Provenance Metadata
 - [ ] Attach provenance metadata to results
 - [ ] Mark origin: clangd / AST / graph / heuristic
 - [ ] Return exact file:line:column locations
